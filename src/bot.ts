@@ -1,4 +1,3 @@
-import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from './config';
 import { initTronWeb } from './services/paymentService';
@@ -21,38 +20,15 @@ process.on('unhandledRejection', (err) => {
 
 async function main(): Promise<void> {
   console.log('Starting bot...');
-  console.log('PORT:', config.port);
-  console.log('Admin ID:', config.adminTelegramId);
 
   try {
     initTronWeb();
-    console.log('TronWeb initialized');
   } catch (err) {
     console.error('TronWeb init failed (non-critical):', err);
   }
 
-  const app = express();
-  app.use(express.json());
+  const bot = new TelegramBot(config.botToken, { polling: true });
 
-  // Healthcheck endpoint for Railway / monitoring
-  app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
-
-  const server = app.listen(config.port, '0.0.0.0', () => {
-    console.log(`Healthcheck server listening on port ${config.port}`);
-  });
-
-  console.log('Creating Telegram bot...');
-  const bot = new TelegramBot(config.botToken, {
-    polling: config.webhookUrl ? false : true,
-  });
-
-  if (config.webhookUrl) {
-    await bot.setWebHook(`${config.webhookUrl}/${config.botToken}`);
-  }
-
-  console.log('Registering handlers...');
   registerStartHandler(bot);
   registerCallbackHandler(bot);
   registerMessageHandler(bot);
@@ -62,15 +38,8 @@ async function main(): Promise<void> {
 
   console.log('Escrow bot started');
 
-  // Graceful shutdown
-  process.once('SIGINT', () => {
-    server.close();
-    bot.stopPolling();
-  });
-  process.once('SIGTERM', () => {
-    server.close();
-    bot.stopPolling();
-  });
+  process.once('SIGINT', () => bot.stopPolling());
+  process.once('SIGTERM', () => bot.stopPolling());
 }
 
 main().catch((err) => {
