@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { findOrCreateUser } from '../services/dealService';
 import { prisma } from '../db';
 import { Prisma, TransactionType, TxStatus } from '@prisma/client';
+import { sendTrackedMessage } from '../utils/messageTracker';
 
 const withdrawState = new Map<number, { currency: 'USDT' | 'TON'; amount: number; address: string }>();
 
@@ -9,7 +10,8 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
   bot.onText(/\/withdraw/, async (msg) => {
     const chatId = msg.chat.id;
     const user = await findOrCreateUser(msg.from!);
-    await bot.sendMessage(
+    await sendTrackedMessage(
+      bot,
       chatId,
       `Ваш баланс:\nUSDT: ${user.balanceUsdt.toFixed(2)}\nTON: ${user.balanceTon.toFixed(4)}\n\n` +
         `Выберите валюту для вывода:`,
@@ -33,7 +35,7 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
       const currency = data.replace('withdraw_currency_', '') as 'USDT' | 'TON';
       withdrawState.set(userId, { currency, amount: 0, address: '' });
       await bot.answerCallbackQuery(query.id);
-      await bot.sendMessage(chatId, `Введите сумму для вывода ${currency}:`);
+      await sendTrackedMessage(bot, chatId, `Введите сумму для вывода ${currency}:`);
       return;
     }
 
@@ -76,14 +78,15 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
         );
 
         withdrawState.delete(userId);
-        await bot.sendMessage(
+        await sendTrackedMessage(
+          bot,
           chatId,
           `Заявка на вывод ${state.amount} ${state.currency} на адрес \`${state.address}\` создана.\n` +
             `Администратор обработает её вручную.`,
           { parse_mode: 'Markdown' }
         );
       } catch (err) {
-        await bot.sendMessage(chatId, `Ошибка: ${(err as Error).message}`);
+        await sendTrackedMessage(bot, chatId, `Ошибка: ${(err as Error).message}`);
       }
       return;
     }
@@ -99,19 +102,20 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
     if (state.amount === 0) {
       const amount = parseFloat(msg.text.replace(',', '.'));
       if (Number.isNaN(amount) || amount <= 0) {
-        await bot.sendMessage(chatId, 'Введите положительную сумму.');
+        await sendTrackedMessage(bot, chatId, 'Введите положительную сумму.');
         return;
       }
       state.amount = amount;
       withdrawState.set(userId, state);
-      await bot.sendMessage(chatId, 'Введите адрес для вывода:');
+      await sendTrackedMessage(bot, chatId, 'Введите адрес для вывода:');
       return;
     }
 
     if (state.address === '') {
       state.address = msg.text.trim();
       withdrawState.set(userId, state);
-      await bot.sendMessage(
+      await sendTrackedMessage(
+        bot,
         chatId,
         `Подтвердите вывод:\nСумма: ${state.amount} ${state.currency}\nАдрес: ${state.address}`,
         {
