@@ -2,8 +2,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install dependencies (including devDependencies for TypeScript build)
+# Copy package files and Prisma schema first (postinstall needs it)
 COPY package*.json ./
+COPY prisma ./prisma
+
 RUN npm install
 
 # Copy source and build
