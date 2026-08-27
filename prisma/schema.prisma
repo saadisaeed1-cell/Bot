@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int      @id @default(autoincrement())
+  telegramId  BigInt   @unique @map("telegram_id")
+  username    String?
+  firstName   String?  @map("first_name")
+  lastName    String?  @map("last_name")
+  balanceUsdt Decimal  @default(0) @map("balance_usdt") @db.Decimal(18, 8)
+  balanceTon  Decimal  @default(0) @map("balance_ton") @db.Decimal(18, 8)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdDeals      Deal[]        @relation("DealCreator")
+  participatedDeals Deal[]        @relation("DealParticipant")
+  transactions      Transaction[]
+
+  @@index([telegramId])
+  @@map("users")
+}
+
+model Deal {
+  id                String     @id @default(uuid())
+  creatorId         Int        @map("creator_id")
+  creatorRole       DealRole   @default(SELLER) @map("creator_role")
+  participantId     Int?       @map("participant_id")
+  amount            Decimal    @db.Decimal(18, 8)
+  commissionPercent Decimal    @default(3) @map("commission_percent") @db.Decimal(5, 2)
+  currency          String     @default("USDT") // USDT / TON
+  status            DealStatus @default(PENDING_PARTICIPANT)
+  description       String     @db.Text
+  paymentAddress    String?    @map("payment_address")
+  txHash            String?    @map("tx_hash") @unique
+  sellerConfirmed   Boolean    @default(false) @map("seller_confirmed")
+  buyerConfirmed    Boolean    @default(false) @map("buyer_confirmed")
+  disputeReason     String?    @map("dispute_reason") @db.Text
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  creator     User          @relation("DealCreator", fields: [creatorId], references: [id])
+  participant User?         @relation("DealParticipant", fields: [participantId], references: [id])
+  transactions Transaction[]
+  statusLogs  DealStatusLog[]
+
+  @@index([status])
+  @@index([creatorId])
+  @@index([participantId])
+  @@map("deals")
+}
+
+model Transaction {
+  id          Int             @id @default(autoincrement())
+  userId      Int             @map("user_id")
+  dealId      String?         @map("deal_id")
+  type        TransactionType
+  amount      Decimal         @db.Decimal(18, 8)
+  currency    String          @default("USDT")
+  txHash      String?         @map("tx_hash")
+  status      TxStatus        @default(COMPLETED)
+  description String?         @db.Text
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  user User  @relation(fields: [userId], references: [id])
+  deal Deal? @relation(fields: [dealId], references: [id])
+
+  @@index([userId])
+  @@index([dealId])
+  @@map("transactions")
+}
+
+model DealStatusLog {
+  id        Int        @id @default(autoincrement())
+  dealId    String     @map("deal_id")
+  oldStatus DealStatus @map("old_status")
+  newStatus DealStatus @map("new_status")
+  note      String?    @db.Text
+  createdAt DateTime   @default(now()) @map("created_at")
+
+  deal Deal @relation(fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@index([dealId])
+  @@map("deal_status_logs")
+}
+
+enum DealRole {
+  SELLER
+  BUYER
+}
+
+enum DealStatus {
+  PENDING_PARTICIPANT
+  PENDING_PAYMENT
+  FUNDS_FROZEN
+  DELIVERY_PENDING
+  COMPLETED
+  DISPUTE
+  REFUNDED
+  RELEASED_TO_SELLER
+  CANCELLED
+}
+
+enum TransactionType {
+  DEPOSIT
+  ESCROW_HOLD
+  ESCROW_RELEASE
+  ESCROW_REFUND
+  WITHDRAWAL
+  FEE
+}
+
+enum TxStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
