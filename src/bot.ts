@@ -11,8 +11,25 @@ import {
 import { registerAdminHandler } from './handlers/adminHandler';
 import { registerWithdrawalHandler } from './handlers/withdrawalHandler';
 
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
+});
+
 async function main(): Promise<void> {
-  initTronWeb();
+  console.log('Starting bot...');
+  console.log('PORT:', config.port);
+  console.log('Admin ID:', config.adminTelegramId);
+
+  try {
+    initTronWeb();
+    console.log('TronWeb initialized');
+  } catch (err) {
+    console.error('TronWeb init failed (non-critical):', err);
+  }
 
   const app = express();
   app.use(express.json());
@@ -22,10 +39,11 @@ async function main(): Promise<void> {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, '0.0.0.0', () => {
     console.log(`Healthcheck server listening on port ${config.port}`);
   });
 
+  console.log('Creating Telegram bot...');
   const bot = new TelegramBot(config.botToken, {
     polling: config.webhookUrl ? false : true,
   });
@@ -34,6 +52,7 @@ async function main(): Promise<void> {
     await bot.setWebHook(`${config.webhookUrl}/${config.botToken}`);
   }
 
+  console.log('Registering handlers...');
   registerStartHandler(bot);
   registerCallbackHandler(bot);
   registerMessageHandler(bot);
@@ -44,8 +63,14 @@ async function main(): Promise<void> {
   console.log('Escrow bot started');
 
   // Graceful shutdown
-  process.once('SIGINT', () => bot.stopPolling());
-  process.once('SIGTERM', () => bot.stopPolling());
+  process.once('SIGINT', () => {
+    server.close();
+    bot.stopPolling();
+  });
+  process.once('SIGTERM', () => {
+    server.close();
+    bot.stopPolling();
+  });
 }
 
 main().catch((err) => {
