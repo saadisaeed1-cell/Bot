@@ -1,6 +1,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../config';
 import { getPendingDisputes, resolveDispute, getDeal, dealUserIds } from '../services/dealService';
+import { getCategoryLabel } from '../services/termsService';
 
 function isAdmin(telegramId: number): boolean {
   return telegramId === config.adminTelegramId;
@@ -28,6 +29,7 @@ export function registerAdminHandler(bot: TelegramBot): void {
       await bot.sendMessage(
         chatId,
         `Спор *#${deal.id}*\n` +
+          `Категория: ${getCategoryLabel(deal.category)}\n` +
           `Сумма: ${deal.amount} ${deal.currency}\n` +
           `Продавец: ${seller?.firstName ?? '?'} (ID ${seller?.telegramId ?? '?'})\n` +
           `Покупатель: ${buyer?.firstName ?? '?'} (ID ${buyer?.telegramId ?? '?'})\n` +
@@ -69,6 +71,7 @@ export function registerAdminHandler(bot: TelegramBot): void {
       chatId,
       `Сделка *#${deal.id}*\n` +
         `Статус: ${deal.status}\n` +
+        `Категория: ${getCategoryLabel(deal.category)}\n` +
         `Сумма: ${deal.amount} ${deal.currency}\n` +
         `Комиссия: ${deal.commissionPercent}%\n` +
         `Продавец: ${seller?.telegramId ?? '—'}\n` +

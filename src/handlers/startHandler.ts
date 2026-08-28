@@ -1,4 +1,5 @@
 import TelegramBot from 'node-telegram-bot-api';
+import { DealCategory } from '@prisma/client';
 import {
   findOrCreateUser,
   createDeal,
@@ -13,8 +14,10 @@ import {
   confirmDealCompletion,
   openDispute,
   setDealPaymentAddress,
+  acceptParticipantTerms,
 } from '../services/dealService';
 import { generateUsdtTrc20Address, generateTonAddress } from '../services/paymentService';
+import { DEAL_CATEGORIES, getCategoryLabel, buildTermsMessage } from '../services/termsService';
 import { config } from '../config';
 import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
 import { clearWithdrawState } from './withdrawalHandler';
@@ -23,6 +26,7 @@ const userState = new Map<number, { action: string; payload?: unknown }>();
 
 const ACTIVE_STATUSES = [
   'PENDING_PARTICIPANT',
+  'PENDING_TERMS',
   'PENDING_PAYMENT',
   'FUNDS_FROZEN',
   'DELIVERY_PENDING',
@@ -31,6 +35,7 @@ const ACTIVE_STATUSES = [
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING_PARTICIPANT: '⏳ Ожидает участника',
+  PENDING_TERMS: '📜 Ожидает принятия правил',
   PENDING_PAYMENT: '💳 Ожидает оплаты',
   FUNDS_FROZEN: '🔒 Средства заморожены',
   DELIVERY_PENDING: '📦 Ожидает подтверждения',
@@ -94,26 +99,36 @@ export function registerStartHandler(bot: TelegramBot): void {
       const dealId = arg.replace('deal_', '');
       try {
         const deal = await joinDeal(dealId, user.id);
-        const { sellerId, buyerId } = dealUserIds(deal);
+        const { sellerId } = dealUserIds(deal);
         const seller = sellerId === deal.creatorId ? deal.creator : deal.participant;
-        const buyer = buyerId === deal.creatorId ? deal.creator : deal.participant;
+        const participantRole = deal.creatorRole === 'SELLER' ? 'BUYER' : 'SELLER';
 
         await sendTrackedMessage(
           bot,
           chatId,
           `✅ *Вы присоединились к сделке* \`#${deal.id.slice(0, 8)}\`\n\n` +
-            `👤 *Ваша роль:* ${deal.creatorRole === 'SELLER' ? 'покупатель' : 'продавец'}\n` +
+            `👤 *Ваша роль:* ${participantRole === 'BUYER' ? 'покупатель' : 'продавец'}\n` +
+            `📦 *Категория:* ${getCategoryLabel(deal.category)}\n` +
             `💰 *Сумма:* ${deal.amount} ${deal.currency}\n` +
             `📝 *Условия:* ${deal.description}\n\n` +
-            `${buyer?.telegramId === user.telegramId ? '⏳ Ожидайте реквизиты для оплаты от бота.' : '⏳ Ожидайте оплаты от покупателя.'}`,
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+            `Прежде чем продолжить, ознакомьтесь с правилами ниже и примите их:\n\n` +
+            buildTermsMessage(deal.category, participantRole),
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '✅ Принимаю условия', callback_data: `terms_accept_participant:${deal.id}` }],
+                [MENU_BUTTON],
+              ],
+            },
+          }
         );
 
         if (seller) {
           await bot.sendMessage(
             seller.telegramId.toString(),
             `🤝 *Участник присоединился к вашей сделке* \`#${deal.id.slice(0, 8)}\`\n\n` +
-              `Если вы продавец — отправьте товар/услугу после поступления средств в эскроу.`,
+              `Ожидаем, пока он примет правила сделки.`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
           );
         }
@@ -253,11 +268,11 @@ export function registerCallbackHandler(bot: TelegramBot): void {
         chatId,
         `📖 *Правила и FAQ*\n\n` +
           `1️⃣ *Как работает гарант?*\n` +
-          `Покупатель переводит средства на счёт сервиса. Деньги хранятся в заморозке, пока продавец не передаст товар/услугу, а покупатель не подтвердит получение.\n\n` +
+          `При создании сделки выбирается тип (Подарки/NFT, Звезды, Аккаунты, Цифровые товары), после чего обе стороны обязаны принять правила, соответствующие категории. Покупатель переводит средства на счёт сервиса. Деньги хранятся в заморозке, пока продавец не передаст товар/услугу, а покупатель не подтвердит получение.\n\n` +
           `2️⃣ *Комиссия*\n` +
           `Сервис берёт ${config.serviceFeePercent}% от суммы сделки при её успешном завершении.\n\n` +
           `3️⃣ *Что если возник спор?*\n` +
-          `Любая сторона может открыть спор. Администратор рассмотрит доказательства и примет решение — вернуть деньги покупателю или отдать продавцу.\n\n` +
+          `Любая сторона может открыть спор. Решение администратора (гаранта) является окончательным.\n\n` +
           `4️⃣ *Как вывести средства?*\n` +
           `Используйте команду /withdraw или кнопку «Кошелек / Баланс» → «Вывести».\n\n` +
           `5️⃣ *Поддерживаемые валюты*\n` +
@@ -299,7 +314,51 @@ export function registerCallbackHandler(bot: TelegramBot): void {
 
     if (data.startsWith('role_')) {
       const role = data.replace('role_', '') as 'SELLER' | 'BUYER';
-      setUserState(userId, { action: 'create_deal_currency', payload: { role } });
+      setUserState(userId, { action: 'create_deal_category', payload: { role } });
+      await sendTrackedMessage(bot, chatId, '📦 Выберите тип сделки:', {
+        reply_markup: {
+          inline_keyboard: [
+            ...DEAL_CATEGORIES.map((c) => [{ text: `${c.emoji} ${c.label}`, callback_data: `category_${c.value}` }]),
+            [MENU_BUTTON],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data.startsWith('category_')) {
+      const category = data.replace('category_', '') as DealCategory;
+      const state = getUserState(userId);
+      const { role } = (state?.payload as { role: 'SELLER' | 'BUYER' }) ?? {};
+      if (!role) {
+        await sendTrackedMessage(bot, chatId, '❌ Сессия устарела, начните заново: /newdeal', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      setUserState(userId, { action: 'create_deal_terms', payload: { role, category } });
+      await sendTrackedMessage(bot, chatId, buildTermsMessage(category, role), {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Принимаю условия', callback_data: 'terms_accept_creator' }],
+            [MENU_BUTTON],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (data === 'terms_accept_creator') {
+      const state = getUserState(userId);
+      const payload = state?.payload as { role: 'SELLER' | 'BUYER'; category: DealCategory } | undefined;
+      if (state?.action !== 'create_deal_terms' || !payload) {
+        await sendTrackedMessage(bot, chatId, '❌ Сессия устарела, начните заново: /newdeal', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      setUserState(userId, { action: 'create_deal_currency', payload });
       await sendTrackedMessage(bot, chatId, '💱 Выберите валюту сделки:', {
         reply_markup: {
           inline_keyboard: [
@@ -309,6 +368,43 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           ],
         },
       });
+      return;
+    }
+
+    if (data.startsWith('terms_accept_participant:')) {
+      const dealId = data.replace('terms_accept_participant:', '');
+      try {
+        const updated = await acceptParticipantTerms(dealId, user.id);
+        const seller = getSellerId(updated) === updated.creatorId ? updated.creator : updated.participant;
+
+        const paymentAddress =
+          updated.currency === 'USDT'
+            ? (await generateUsdtTrc20Address()) ?? 'TRON_NOT_CONFIGURED'
+            : generateTonAddress() ?? 'TON_NOT_CONFIGURED';
+        const withAddress = await setDealPaymentAddress(updated.id, paymentAddress);
+
+        await sendTrackedMessage(
+          bot,
+          chatId,
+          `✅ Условия приняты!\n\n` +
+            `💳 Переведите точную сумму *${withAddress.amount} ${withAddress.currency}* на адрес:\n` +
+            `\`${paymentAddress}\`\n\n` +
+            `После поступления средств сделка перейдет в статус «Средства заморожены».`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+        );
+
+        if (seller) {
+          await bot.sendMessage(
+            seller.telegramId.toString(),
+            `✅ Участник принял правила сделки \`#${updated.id.slice(0, 8)}\`. Ожидаем поступления средств от покупателя.`,
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+          );
+        }
+      } catch (err) {
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      }
       return;
     }
 
@@ -422,8 +518,9 @@ export function registerMessageHandler(bot: TelegramBot): void {
     }
 
     if (state.action === 'create_deal_description') {
-      const { role, currency, amount } = state.payload as {
+      const { role, category, currency, amount } = state.payload as {
         role: 'SELLER' | 'BUYER';
+        category: DealCategory;
         currency: 'USDT' | 'TON';
         amount: number;
       };
@@ -431,17 +528,11 @@ export function registerMessageHandler(bot: TelegramBot): void {
         const deal = await createDeal({
           creatorId: user.id,
           creatorRole: role,
+          category,
           amount,
           description: msg.text,
           currency,
         });
-
-        // Generate a unique deposit address for the buyer
-        const paymentAddress = currency === 'USDT'
-          ? (await generateUsdtTrc20Address()) ?? 'TRON_NOT_CONFIGURED'
-          : generateTonAddress() ?? 'TON_NOT_CONFIGURED';
-
-        await setDealPaymentAddress(deal.id, paymentAddress);
 
         const link = getDealInviteLink(deal.id);
         const roleText = role === 'SELLER' ? 'продавец' : 'покупатель';
@@ -451,11 +542,12 @@ export function registerMessageHandler(bot: TelegramBot): void {
           chatId,
           `✅ *Сделка* \`#${deal.id.slice(0, 8)}\` *создана!*\n\n` +
             `👤 *Ваша роль:* ${roleText}\n` +
+            `📦 *Категория:* ${getCategoryLabel(category)}\n` +
             `💱 *Валюта:* ${currency}\n` +
             `💰 *Сумма:* ${amount}\n` +
             `📝 *Описание:* ${msg.text}\n\n` +
             `🔗 Отправьте эту ссылку второму участнику:\n${link}\n\n` +
-            `📥 Адрес для оплаты покупателя: \`${paymentAddress}\``,
+            `⏳ После того как участник присоединится и примет правила сделки, вы получите реквизиты для оплаты.`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
       } catch (err) {

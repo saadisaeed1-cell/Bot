@@ -1,4 +1,4 @@
-import { Deal, DealStatus, Prisma, TransactionType, User } from '@prisma/client';
+import { Deal, DealCategory, DealStatus, Prisma, TransactionType, User } from '@prisma/client';
 import { prisma } from '../db';
 import { config } from '../config';
 
@@ -63,6 +63,7 @@ export function getDealInviteLink(dealId: string): string {
 export async function createDeal(params: {
   creatorId: number;
   creatorRole: 'SELLER' | 'BUYER';
+  category: DealCategory;
   amount: number;
   description: string;
   currency: 'USDT' | 'TON';
@@ -75,11 +76,13 @@ export async function createDeal(params: {
       data: {
         creatorId: params.creatorId,
         creatorRole: params.creatorRole,
+        category: params.category,
         amount,
         description: params.description,
         currency: params.currency,
         commissionPercent: new Prisma.Decimal(config.serviceFeePercent),
         status: DealStatus.PENDING_PARTICIPANT,
+        creatorTermsAccepted: true,
       },
     });
 
@@ -88,7 +91,7 @@ export async function createDeal(params: {
         dealId: deal.id,
         oldStatus: DealStatus.PENDING_PARTICIPANT,
         newStatus: DealStatus.PENDING_PARTICIPANT,
-        note: `Deal created by ${params.creatorRole}`,
+        note: `Deal created by ${params.creatorRole}, category ${params.category}`,
       },
     });
 
@@ -116,7 +119,7 @@ export async function joinDeal(dealId: string, participantId: number): Promise<D
         where: { id: dealId, status: DealStatus.PENDING_PARTICIPANT },
         data: {
           participantId,
-          status: DealStatus.PENDING_PAYMENT,
+          status: DealStatus.PENDING_TERMS,
         },
         include: { creator: true, participant: true },
       });
@@ -125,8 +128,51 @@ export async function joinDeal(dealId: string, participantId: number): Promise<D
         data: {
           dealId: deal.id,
           oldStatus: DealStatus.PENDING_PARTICIPANT,
-          newStatus: DealStatus.PENDING_PAYMENT,
+          newStatus: DealStatus.PENDING_TERMS,
           note: `Participant ${participantId} joined`,
+        },
+      });
+
+      return updated;
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
+}
+
+export async function acceptParticipantTerms(
+  dealId: string,
+  participantId: number
+): Promise<DealWithUsers> {
+  return prisma.$transaction(
+    async (tx) => {
+      const deal = await tx.deal.findUnique({
+        where: { id: dealId },
+        include: { creator: true, participant: true },
+      });
+
+      if (!deal) throw new Error('Deal not found');
+      if (deal.status !== DealStatus.PENDING_TERMS) {
+        throw new Error('Deal is not waiting for terms acceptance');
+      }
+      if (deal.participantId !== participantId) {
+        throw new Error('Only the invited participant can accept terms');
+      }
+
+      const updated = await tx.deal.update({
+        where: { id: dealId, status: DealStatus.PENDING_TERMS },
+        data: {
+          participantTermsAccepted: true,
+          status: DealStatus.PENDING_PAYMENT,
+        },
+        include: { creator: true, participant: true },
+      });
+
+      await tx.dealStatusLog.create({
+        data: {
+          dealId: deal.id,
+          oldStatus: DealStatus.PENDING_TERMS,
+          newStatus: DealStatus.PENDING_PAYMENT,
+          note: `Participant ${participantId} accepted terms`,
         },
       });
 

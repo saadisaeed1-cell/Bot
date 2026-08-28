@@ -27,22 +27,25 @@ model User {
 }
 
 model Deal {
-  id                String     @id @default(uuid())
-  creatorId         Int        @map("creator_id")
-  creatorRole       DealRole   @default(SELLER) @map("creator_role")
-  participantId     Int?       @map("participant_id")
-  amount            Decimal    @db.Decimal(18, 8)
-  commissionPercent Decimal    @default(3) @map("commission_percent") @db.Decimal(5, 2)
-  currency          String     @default("USDT") // USDT / TON
-  status            DealStatus @default(PENDING_PARTICIPANT)
-  description       String     @db.Text
-  paymentAddress    String?    @map("payment_address")
-  txHash            String?    @map("tx_hash") @unique
-  sellerConfirmed   Boolean    @default(false) @map("seller_confirmed")
-  buyerConfirmed    Boolean    @default(false) @map("buyer_confirmed")
-  disputeReason     String?    @map("dispute_reason") @db.Text
-  createdAt         DateTime   @default(now()) @map("created_at")
-  updatedAt         DateTime   @updatedAt @map("updated_at")
+  id                        String       @id @default(uuid())
+  creatorId                 Int          @map("creator_id")
+  creatorRole               DealRole     @default(SELLER) @map("creator_role")
+  participantId             Int?         @map("participant_id")
+  category                  DealCategory @default(GIFTS_NFT)
+  amount                    Decimal      @db.Decimal(18, 8)
+  commissionPercent         Decimal      @default(3) @map("commission_percent") @db.Decimal(5, 2)
+  currency                  String       @default("USDT") // USDT / TON
+  status                    DealStatus   @default(PENDING_PARTICIPANT)
+  description               String       @db.Text
+  paymentAddress            String?      @map("payment_address")
+  txHash                    String?      @map("tx_hash") @unique
+  sellerConfirmed           Boolean      @default(false) @map("seller_confirmed")
+  buyerConfirmed            Boolean      @default(false) @map("buyer_confirmed")
+  creatorTermsAccepted      Boolean      @default(true) @map("creator_terms_accepted")
+  participantTermsAccepted  Boolean      @default(false) @map("participant_terms_accepted")
+  disputeReason             String?      @map("dispute_reason") @db.Text
+  createdAt                 DateTime     @default(now()) @map("created_at")
+  updatedAt                 DateTime     @updatedAt @map("updated_at")
 
   creator     User          @relation("DealCreator", fields: [creatorId], references: [id])
   participant User?         @relation("DealParticipant", fields: [participantId], references: [id])
@@ -94,8 +97,16 @@ enum DealRole {
   BUYER
 }
 
+enum DealCategory {
+  GIFTS_NFT
+  STARS_XTR
+  ACCOUNTS
+  DIGITAL_KEYS
+}
+
 enum DealStatus {
   PENDING_PARTICIPANT
+  PENDING_TERMS
   PENDING_PAYMENT
   FUNDS_FROZEN
   DELIVERY_PENDING

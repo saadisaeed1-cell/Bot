@@ -4,6 +4,7 @@ import { prisma } from '../db';
 import { DealStatus } from '@prisma/client';
 import { verifyUsdtTrc20Payment } from './paymentService';
 import { confirmPayment, getBuyerId, getSellerId } from './dealService';
+import { MENU_BUTTON } from '../utils/messageTracker';
 
 /**
  * Scans deals in PENDING_PAYMENT status and verifies on-chain deposits.
@@ -36,7 +37,7 @@ export function startPaymentWatcher(bot: TelegramBot): void {
               buyer.telegramId.toString(),
               `Оплата сделки *#${updated.id}* подтверждена. Средства заморожены в эскроу.\n\n` +
                 `Ожидайте передачи товара/услуги от продавца.`,
-              { parse_mode: 'Markdown' }
+              { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
           }
 
@@ -50,6 +51,7 @@ export function startPaymentWatcher(bot: TelegramBot): void {
                 reply_markup: {
                   inline_keyboard: [
                     [{ text: 'Товар передан', callback_data: `deal:${updated.id}:seller_delivered` }],
+                    [MENU_BUTTON],
                   ],
                 },
               }
