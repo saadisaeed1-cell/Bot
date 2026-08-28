@@ -29,6 +29,16 @@ async function main(): Promise<void> {
 
   const bot = new TelegramBot(config.botToken, { polling: true });
 
+  // Debug helper: log chat id/title for any non-private chat (groups/supergroups)
+  // so the group's chat_id can be found via Railway logs. Safe to keep enabled.
+  bot.on('message', (msg) => {
+    if (msg.chat.type !== 'private') {
+      console.log(
+        `[chat-id] type=${msg.chat.type} id=${msg.chat.id} title=${msg.chat.title ?? ''}`
+      );
+    }
+  });
+
   registerStartHandler(bot);
   registerCallbackHandler(bot);
   registerMessageHandler(bot);
