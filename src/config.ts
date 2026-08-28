@@ -30,4 +30,8 @@ export const config = {
     apiKey: process.env.TON_API_KEY,
     escrowMnemonic: process.env.TON_ESCROW_MNEMONIC,
   },
+  // Private supergroup with Topics enabled, used as an isolated chat room per deal.
+  forumGroupChatId: process.env.FORUM_GROUP_CHAT_ID,
+  // Optional: set only if the group is public (has a @username), enables direct topic links.
+  forumGroupUsername: process.env.FORUM_GROUP_USERNAME,
 };

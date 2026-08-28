@@ -35,7 +35,7 @@ export function startPaymentWatcher(bot: TelegramBot): void {
           if (buyer) {
             await bot.sendMessage(
               buyer.telegramId.toString(),
-              `Оплата сделки *#${updated.id}* подтверждена. Средства заморожены в эскроу.\n\n` +
+              `Оплата сделки *#${updated.code}* подтверждена. Средства заморожены в эскроу.\n\n` +
                 `Ожидайте передачи товара/услуги от продавца.`,
               { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
@@ -44,7 +44,7 @@ export function startPaymentWatcher(bot: TelegramBot): void {
           if (seller) {
             await bot.sendMessage(
               seller.telegramId.toString(),
-              `Покупатель оплатил сделку *#${updated.id}*. Средства заморожены.\n\n` +
+              `Покупатель оплатил сделку *#${updated.code}*. Средства заморожены.\n\n` +
                 `Передайте товар/услугу и нажмите «Товар передан».`,
               {
                 parse_mode: 'Markdown',

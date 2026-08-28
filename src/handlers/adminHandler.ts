@@ -1,6 +1,12 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../config';
-import { getPendingDisputes, resolveDispute, getDeal, dealUserIds } from '../services/dealService';
+import {
+  getPendingDisputes,
+  resolveDispute,
+  getDeal,
+  getDealByCode,
+  dealUserIds,
+} from '../services/dealService';
 import { getCategoryLabel } from '../services/termsService';
 
 function isAdmin(telegramId: number): boolean {
@@ -28,7 +34,7 @@ export function registerAdminHandler(bot: TelegramBot): void {
 
       await bot.sendMessage(
         chatId,
-        `Спор *#${deal.id}*\n` +
+        `Спор *#${deal.code}*\n` +
           `Категория: ${getCategoryLabel(deal.category)}\n` +
           `Сумма: ${deal.amount} ${deal.currency}\n` +
           `Продавец: ${seller?.firstName ?? '?'} (ID ${seller?.telegramId ?? '?'})\n` +
@@ -56,8 +62,10 @@ export function registerAdminHandler(bot: TelegramBot): void {
       return;
     }
 
-    const dealId = match![1].trim();
-    const deal = await getDeal(dealId);
+    const idOrCode = match![1].trim();
+    const deal = /^\d{6}$/.test(idOrCode)
+      ? await getDealByCode(idOrCode)
+      : await getDeal(idOrCode);
     if (!deal) {
       await bot.sendMessage(chatId, 'Сделка не найдена.');
       return;
@@ -69,7 +77,7 @@ export function registerAdminHandler(bot: TelegramBot): void {
 
     await bot.sendMessage(
       chatId,
-      `Сделка *#${deal.id}*\n` +
+      `Сделка *#${deal.code}*\n` +
         `Статус: ${deal.status}\n` +
         `Категория: ${getCategoryLabel(deal.category)}\n` +
         `Сумма: ${deal.amount} ${deal.currency}\n` +
@@ -118,7 +126,7 @@ export function registerAdminHandler(bot: TelegramBot): void {
       const updated = await resolveDispute(dealId, winner as 'buyer' | 'seller');
       await bot.sendMessage(
         query.message!.chat.id,
-        `Спор *#${updated.id}* разрешен в пользу ${winner === 'seller' ? 'продавца' : 'покупателя'}.`,
+        `Спор *#${updated.code}* разрешен в пользу ${winner === 'seller' ? 'продавца' : 'покупателя'}.`,
         { parse_mode: 'Markdown' }
       );
 
@@ -129,14 +137,14 @@ export function registerAdminHandler(bot: TelegramBot): void {
       if (seller) {
         await bot.sendMessage(
           seller.telegramId.toString(),
-          `Спор по сделке *#${updated.id}* разрешен.`,
+          `Спор по сделке *#${updated.code}* разрешен.`,
           { parse_mode: 'Markdown' }
         );
       }
       if (buyer) {
         await bot.sendMessage(
           buyer.telegramId.toString(),
-          `Спор по сделке *#${updated.id}* разрешен.`,
+          `Спор по сделке *#${updated.code}* разрешен.`,
           { parse_mode: 'Markdown' }
         );
       }

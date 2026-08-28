@@ -28,6 +28,7 @@ model User {
 
 model Deal {
   id                        String       @id @default(uuid())
+  code                      String       @unique @db.Char(6)
   creatorId                 Int          @map("creator_id")
   creatorRole               DealRole     @default(SELLER) @map("creator_role")
   participantId             Int?         @map("participant_id")
@@ -39,6 +40,7 @@ model Deal {
   description               String       @db.Text
   paymentAddress            String?      @map("payment_address")
   txHash                    String?      @map("tx_hash") @unique
+  forumTopicId              Int?         @map("forum_topic_id")
   sellerConfirmed           Boolean      @default(false) @map("seller_confirmed")
   buyerConfirmed            Boolean      @default(false) @map("buyer_confirmed")
   creatorTermsAccepted      Boolean      @default(true) @map("creator_terms_accepted")

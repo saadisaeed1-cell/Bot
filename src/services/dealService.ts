@@ -60,6 +60,10 @@ export function getDealInviteLink(dealId: string): string {
   return `https://t.me/${process.env.BOT_USERNAME || 'your_bot'}?start=deal_${dealId}`;
 }
 
+function generateCandidateCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
 export async function createDeal(params: {
   creatorId: number;
   creatorRole: 'SELLER' | 'BUYER';
@@ -71,32 +75,93 @@ export async function createDeal(params: {
   const amount = new Prisma.Decimal(params.amount);
   if (amount.lessThanOrEqualTo(0)) throw new Error('Amount must be positive');
 
-  return prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.create({
-      data: {
-        creatorId: params.creatorId,
-        creatorRole: params.creatorRole,
-        category: params.category,
-        amount,
-        description: params.description,
-        currency: params.currency,
-        commissionPercent: new Prisma.Decimal(config.serviceFeePercent),
-        status: DealStatus.PENDING_PARTICIPANT,
-        creatorTermsAccepted: true,
-      },
-    });
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const code = generateCandidateCode();
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const deal = await tx.deal.create({
+          data: {
+            code,
+            creatorId: params.creatorId,
+            creatorRole: params.creatorRole,
+            category: params.category,
+            amount,
+            description: params.description,
+            currency: params.currency,
+            commissionPercent: new Prisma.Decimal(config.serviceFeePercent),
+            status: DealStatus.PENDING_PARTICIPANT,
+            creatorTermsAccepted: true,
+          },
+        });
 
-    await tx.dealStatusLog.create({
-      data: {
-        dealId: deal.id,
-        oldStatus: DealStatus.PENDING_PARTICIPANT,
-        newStatus: DealStatus.PENDING_PARTICIPANT,
-        note: `Deal created by ${params.creatorRole}, category ${params.category}`,
-      },
-    });
+        await tx.dealStatusLog.create({
+          data: {
+            dealId: deal.id,
+            oldStatus: DealStatus.PENDING_PARTICIPANT,
+            newStatus: DealStatus.PENDING_PARTICIPANT,
+            note: `Deal created by ${params.creatorRole}, category ${params.category}`,
+          },
+        });
 
-    return deal;
+        return deal;
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        continue; // Code collision — extremely unlikely, retry with a new one.
+      }
+      throw err;
+    }
+  }
+  throw new Error('Failed to generate a unique deal code, please try again');
+}
+
+export async function getDealByCode(code: string): Promise<DealWithUsers | null> {
+  return prisma.deal.findUnique({
+    where: { code },
+    include: { creator: true, participant: true },
   });
+}
+
+const CANCELLABLE_STATUSES: DealStatus[] = [
+  DealStatus.PENDING_PARTICIPANT,
+  DealStatus.PENDING_TERMS,
+  DealStatus.PENDING_PAYMENT,
+];
+
+export async function cancelDeal(dealId: string, userId: number): Promise<DealWithUsers> {
+  return prisma.$transaction(
+    async (tx) => {
+      const deal = await tx.deal.findUnique({
+        where: { id: dealId },
+        include: { creator: true, participant: true },
+      });
+      if (!deal) throw new Error('Deal not found');
+      if (deal.creatorId !== userId && deal.participantId !== userId) {
+        throw new Error('Not a deal participant');
+      }
+      if (!CANCELLABLE_STATUSES.includes(deal.status)) {
+        throw new Error('Deal can no longer be cancelled — funds are already in escrow');
+      }
+
+      const updated = await tx.deal.update({
+        where: { id: dealId, status: deal.status },
+        data: { status: DealStatus.CANCELLED },
+        include: { creator: true, participant: true },
+      });
+
+      await tx.dealStatusLog.create({
+        data: {
+          dealId: deal.id,
+          oldStatus: deal.status,
+          newStatus: DealStatus.CANCELLED,
+          note: `Cancelled by user ${userId}`,
+        },
+      });
+
+      return updated;
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
 }
 
 export async function joinDeal(dealId: string, participantId: number): Promise<DealWithUsers> {

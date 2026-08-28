@@ -1,10 +1,11 @@
 import TelegramBot from 'node-telegram-bot-api';
-import { DealCategory } from '@prisma/client';
+import { DealCategory, User } from '@prisma/client';
 import {
   findOrCreateUser,
   createDeal,
   joinDeal,
   getDeal,
+  getDealByCode,
   getUserDeals,
   getDealInviteLink,
   getSellerId,
@@ -15,9 +16,18 @@ import {
   openDispute,
   setDealPaymentAddress,
   acceptParticipantTerms,
+  cancelDeal,
+  DealWithUsers,
 } from '../services/dealService';
 import { generateUsdtTrc20Address, generateTonAddress } from '../services/paymentService';
 import { DEAL_CATEGORIES, getCategoryLabel, buildTermsMessage } from '../services/termsService';
+import {
+  isForumConfigured,
+  createDealTopic,
+  getDealChatLink,
+  notifyDisputeInTopic,
+  notifyTopicOnCancel,
+} from '../services/forumService';
 import { config } from '../config';
 import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
 import { clearWithdrawState } from './withdrawalHandler';
@@ -81,11 +91,139 @@ async function sendMainMenu(bot: TelegramBot, chatId: number, userId: number, fi
       inline_keyboard: [
         [{ text: '➕ Создать сделку', callback_data: 'create_deal' }],
         [{ text: `📁 Мои сделки (${activeCount})`, callback_data: 'my_deals' }],
+        [{ text: '🔍 Найти сделку', callback_data: 'find_deal' }],
         [{ text: '💰 Кошелек / Баланс', callback_data: 'balance' }],
         [{ text: '📖 Правила и FAQ', callback_data: 'faq' }],
         [{ text: '🆘 Поддержка', callback_data: 'support' }],
       ],
     },
+  });
+}
+
+async function joinDealFlow(
+  bot: TelegramBot,
+  chatId: number,
+  user: User,
+  dealId: string
+): Promise<void> {
+  try {
+    const deal = await joinDeal(dealId, user.id);
+    const { sellerId } = dealUserIds(deal);
+    const seller = sellerId === deal.creatorId ? deal.creator : deal.participant;
+    const participantRole = deal.creatorRole === 'SELLER' ? 'BUYER' : 'SELLER';
+
+    const chatLink = deal.forumTopicId
+      ? await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code)
+      : null;
+
+    await sendTrackedMessage(
+      bot,
+      chatId,
+      `✅ *Вы присоединились к сделке* #${deal.code}\n\n` +
+        `👤 *Ваша роль:* ${participantRole === 'BUYER' ? 'покупатель' : 'продавец'}\n` +
+        `📦 *Категория:* ${getCategoryLabel(deal.category)}\n` +
+        `💰 *Сумма:* ${deal.amount} ${deal.currency}\n` +
+        `📝 *Условия:* ${deal.description}\n\n` +
+        `Прежде чем продолжить, ознакомьтесь с правилами ниже и примите их:\n\n` +
+        buildTermsMessage(deal.category, participantRole),
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            ...(chatLink ? [[{ text: '💬 Перейти в чат сделки', url: chatLink }]] : []),
+            [{ text: '✅ Принимаю условия', callback_data: `terms_accept_participant:${deal.id}` }],
+            [MENU_BUTTON],
+          ],
+        },
+      }
+    );
+
+    if (seller) {
+      await bot.sendMessage(
+        seller.telegramId.toString(),
+        `🤝 *Участник присоединился к вашей сделке* #${deal.code}\n\n` +
+          `Ожидаем, пока он примет правила сделки.`,
+        { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+      );
+    }
+  } catch (err) {
+    await sendTrackedMessage(bot, chatId, `❌ Ошибка присоединения: ${(err as Error).message}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
+}
+
+async function sendDealsList(bot: TelegramBot, chatId: number, userId: number): Promise<void> {
+  const deals = await getUserDeals(userId);
+  if (deals.length === 0) {
+    await sendTrackedMessage(bot, chatId, '📁 У вас пока нет сделок.', {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  const buttons: TelegramBot.InlineKeyboardButton[][] = deals.map((d) => [
+    {
+      text: `#${d.code} · ${d.amount} ${d.currency} · ${statusLabel(d.status)}`,
+      callback_data: `deal_card:${d.id}`,
+    },
+  ]);
+  buttons.push([MENU_BUTTON]);
+
+  await sendTrackedMessage(bot, chatId, '📁 *Ваши сделки:*\nВыберите сделку для просмотра:', {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function sendDealCard(
+  bot: TelegramBot,
+  chatId: number,
+  deal: DealWithUsers,
+  user: User
+): Promise<void> {
+  const { sellerId, buyerId } = dealUserIds(deal);
+  const isSeller = sellerId === user.id;
+  const isBuyer = buyerId === user.id;
+  const isParty = deal.creatorId === user.id || deal.participantId === user.id;
+  const partner = deal.creatorId === user.id ? deal.participant : deal.creator;
+
+  const text =
+    `📄 *Сделка #${deal.code}*\n\n` +
+    `📦 Категория: ${getCategoryLabel(deal.category)}\n` +
+    `💰 Сумма: ${deal.amount} ${deal.currency}\n` +
+    `📊 Статус: ${statusLabel(deal.status)}\n` +
+    `📝 Описание: ${deal.description}\n` +
+    `👤 Партнер: ${partner?.firstName ?? 'ожидает присоединения'}`;
+
+  const rows: { text: string; url?: string; callback_data?: string }[][] = [];
+
+  if (deal.forumTopicId && isForumConfigured()) {
+    const link = await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code);
+    if (link) rows.push([{ text: '💬 Перейти в чат сделки', url: link }]);
+  }
+
+  if (isParty && ['PENDING_PARTICIPANT', 'PENDING_TERMS', 'PENDING_PAYMENT'].includes(deal.status)) {
+    rows.push([{ text: '❌ Отменить сделку', callback_data: `deal_cancel:${deal.id}` }]);
+  }
+
+  if (isSeller && deal.status === 'FUNDS_FROZEN') {
+    rows.push([{ text: '📦 Товар передан', callback_data: `deal:${deal.id}:seller_delivered` }]);
+  }
+
+  if (isBuyer && deal.status === 'DELIVERY_PENDING') {
+    rows.push([{ text: '✅ Подтвердить / Завершить', callback_data: `deal:${deal.id}:buyer_confirm` }]);
+  }
+
+  if (isParty && ['FUNDS_FROZEN', 'DELIVERY_PENDING'].includes(deal.status)) {
+    rows.push([{ text: '🚨 Открыть спор', callback_data: `deal:${deal.id}:open_dispute` }]);
+  }
+
+  rows.push([MENU_BUTTON]);
+
+  await sendTrackedMessage(bot, chatId, text, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: rows },
   });
 }
 
@@ -97,46 +235,7 @@ export function registerStartHandler(bot: TelegramBot): void {
     const arg = match?.[1];
     if (arg?.startsWith('deal_')) {
       const dealId = arg.replace('deal_', '');
-      try {
-        const deal = await joinDeal(dealId, user.id);
-        const { sellerId } = dealUserIds(deal);
-        const seller = sellerId === deal.creatorId ? deal.creator : deal.participant;
-        const participantRole = deal.creatorRole === 'SELLER' ? 'BUYER' : 'SELLER';
-
-        await sendTrackedMessage(
-          bot,
-          chatId,
-          `✅ *Вы присоединились к сделке* \`#${deal.id.slice(0, 8)}\`\n\n` +
-            `👤 *Ваша роль:* ${participantRole === 'BUYER' ? 'покупатель' : 'продавец'}\n` +
-            `📦 *Категория:* ${getCategoryLabel(deal.category)}\n` +
-            `💰 *Сумма:* ${deal.amount} ${deal.currency}\n` +
-            `📝 *Условия:* ${deal.description}\n\n` +
-            `Прежде чем продолжить, ознакомьтесь с правилами ниже и примите их:\n\n` +
-            buildTermsMessage(deal.category, participantRole),
-          {
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '✅ Принимаю условия', callback_data: `terms_accept_participant:${deal.id}` }],
-                [MENU_BUTTON],
-              ],
-            },
-          }
-        );
-
-        if (seller) {
-          await bot.sendMessage(
-            seller.telegramId.toString(),
-            `🤝 *Участник присоединился к вашей сделке* \`#${deal.id.slice(0, 8)}\`\n\n` +
-              `Ожидаем, пока он примет правила сделки.`,
-            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
-          );
-        }
-      } catch (err) {
-        await sendTrackedMessage(bot, chatId, `❌ Ошибка присоединения: ${(err as Error).message}`, {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-      }
+      await joinDealFlow(bot, chatId, user, dealId);
       return;
     }
 
@@ -160,25 +259,7 @@ export function registerStartHandler(bot: TelegramBot): void {
   bot.onText(/\/mydeals/, async (msg) => {
     const chatId = msg.chat.id;
     const user = await findOrCreateUser(msg.from!);
-    const deals = await getUserDeals(user.id);
-    if (deals.length === 0) {
-      await sendTrackedMessage(bot, chatId, '📁 У вас пока нет сделок.', {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-
-    const lines = deals.map((d) => {
-      const partner = d.creatorId === user.id
-        ? (d.participant?.firstName ?? 'ожидает')
-        : d.creator.firstName;
-      return `\`#${d.id.slice(0, 8)}\` — ${d.amount} ${d.currency} — ${statusLabel(d.status)} (с ${partner})`;
-    });
-
-    await sendTrackedMessage(bot, chatId, `📁 *Ваши сделки:*\n\n${lines.join('\n')}`, {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
+    await sendDealsList(bot, chatId, user.id);
   });
 
   bot.onText(/\/balance/, async (msg) => {
@@ -225,22 +306,57 @@ export function registerCallbackHandler(bot: TelegramBot): void {
     }
 
     if (data === 'my_deals') {
-      const deals = await getUserDeals(user.id);
-      if (deals.length === 0) {
-        await sendTrackedMessage(bot, chatId, '📁 У вас пока нет сделок.', {
-          reply_markup: {
-            inline_keyboard: [[{ text: '⬅️ В меню', callback_data: 'main_menu' }]],
-          },
+      await sendDealsList(bot, chatId, user.id);
+      return;
+    }
+
+    if (data === 'find_deal') {
+      setUserState(userId, { action: 'find_deal_code' });
+      await sendTrackedMessage(bot, chatId, '🔍 Введите 6-значный код сделки:', {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (data.startsWith('deal_card:')) {
+      const dealId = data.replace('deal_card:', '');
+      const deal = await getDeal(dealId);
+      if (!deal) {
+        await sendTrackedMessage(bot, chatId, '❌ Сделка не найдена.', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
         return;
       }
-      const lines = deals.map((d) => `\`#${d.id.slice(0, 8)}\` — ${d.amount} ${d.currency} — ${statusLabel(d.status)}`);
-      await sendTrackedMessage(bot, chatId, `📁 *Ваши сделки:*\n\n${lines.join('\n')}`, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[{ text: '⬅️ В меню', callback_data: 'main_menu' }]],
-        },
-      });
+      await sendDealCard(bot, chatId, deal, user);
+      return;
+    }
+
+    if (data.startsWith('deal_cancel:')) {
+      const dealId = data.replace('deal_cancel:', '');
+      try {
+        const updated = await cancelDeal(dealId, user.id);
+        const partner = updated.creatorId === user.id ? updated.participant : updated.creator;
+
+        await sendTrackedMessage(bot, chatId, `❌ Сделка #${updated.code} отменена.`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+
+        if (partner) {
+          await bot.sendMessage(
+            partner.telegramId.toString(),
+            `❌ Сделка #${updated.code} была отменена собеседником.`,
+            { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+          );
+        }
+
+        if (updated.forumTopicId) {
+          await notifyTopicOnCancel(bot, updated.forumTopicId, updated.code);
+        }
+      } catch (err) {
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      }
       return;
     }
 
@@ -396,7 +512,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
         if (seller) {
           await bot.sendMessage(
             seller.telegramId.toString(),
-            `✅ Участник принял правила сделки \`#${updated.id.slice(0, 8)}\`. Ожидаем поступления средств от покупателя.`,
+            `✅ Участник принял правила сделки #${updated.code}. Ожидаем поступления средств от покупателя.`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
           );
         }
@@ -437,13 +553,13 @@ export function registerCallbackHandler(bot: TelegramBot): void {
         await sendTrackedMessage(
           bot,
           chatId,
-          `📦 Вы отметили товар как переданный по сделке \`#${updated.id.slice(0, 8)}\`. Ожидайте подтверждения покупателя.`,
+          `📦 Вы отметили товар как переданный по сделке #${updated.code}. Ожидайте подтверждения покупателя.`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
         if (buyer) {
           await bot.sendMessage(
             buyer.telegramId.toString(),
-            `📦 Продавец отметил сделку \`#${updated.id.slice(0, 8)}\` как выполненную. Проверьте товар и нажмите «Подтвердить получение».`,
+            `📦 Продавец отметил сделку #${updated.code} как выполненную. Проверьте товар и нажмите «Подтвердить получение».`,
             {
               parse_mode: 'Markdown',
               reply_markup: {
@@ -464,19 +580,22 @@ export function registerCallbackHandler(bot: TelegramBot): void {
         await sendTrackedMessage(
           bot,
           chatId,
-          `✅ Сделка \`#${updated.id.slice(0, 8)}\` завершена. Спасибо!`,
+          `✅ Сделка #${updated.code} завершена. Спасибо!`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
         if (seller) {
           await bot.sendMessage(
             seller.telegramId.toString(),
-            `✅ Сделка \`#${updated.id.slice(0, 8)}\` подтверждена покупателем. Средства зачислены на ваш баланс.`,
+            `✅ Сделка #${updated.code} подтверждена покупателем. Средства зачислены на ваш баланс.`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
           );
         }
       }
 
-      if (action === 'open_dispute' && getBuyerId(deal) === user.id) {
+      if (
+        action === 'open_dispute' &&
+        (getBuyerId(deal) === user.id || getSellerId(deal) === user.id)
+      ) {
         setUserState(userId, { action: 'dispute_reason', payload: { dealId: deal.id } });
         await sendTrackedMessage(bot, chatId, '⚠️ Опишите причину спора:', {
           reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -498,6 +617,26 @@ export function registerMessageHandler(bot: TelegramBot): void {
     if (!state) return;
 
     const user = await findOrCreateUser(msg.from!);
+
+    if (state.action === 'find_deal_code') {
+      const code = msg.text.trim();
+      if (!/^\d{6}$/.test(code)) {
+        await sendTrackedMessage(bot, chatId, 'Код должен состоять из 6 цифр. Попробуйте снова:', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      clearUserState(userId);
+      const deal = await getDealByCode(code);
+      if (!deal) {
+        await sendTrackedMessage(bot, chatId, '❌ Сделка с таким кодом не найдена.', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      await joinDealFlow(bot, chatId, user, deal.id);
+      return;
+    }
 
     if (state.action === 'create_deal_amount') {
       const amount = parseFloat(msg.text.replace(',', '.'));
@@ -534,21 +673,36 @@ export function registerMessageHandler(bot: TelegramBot): void {
           currency,
         });
 
+        const topicId = await createDealTopic(bot, deal.id, deal.code);
+        const chatLink = topicId ? await getDealChatLink(bot, msg.from!.id, topicId, deal.code) : null;
+
         const link = getDealInviteLink(deal.id);
         const roleText = role === 'SELLER' ? 'продавец' : 'покупатель';
 
         await sendTrackedMessage(
           bot,
           chatId,
-          `✅ *Сделка* \`#${deal.id.slice(0, 8)}\` *создана!*\n\n` +
+          `✅ *Сделка #${deal.code} создана!*\n\n` +
             `👤 *Ваша роль:* ${roleText}\n` +
             `📦 *Категория:* ${getCategoryLabel(category)}\n` +
             `💱 *Валюта:* ${currency}\n` +
             `💰 *Сумма:* ${amount}\n` +
             `📝 *Описание:* ${msg.text}\n\n` +
-            `🔗 Отправьте эту ссылку второму участнику:\n${link}\n\n` +
+            `🔑 *Код сделки для второго участника:* \`${deal.code}\`\n` +
+            `Он может ввести его через «🔍 Найти сделку» или перейти по ссылке:\n${link}\n\n` +
+            (chatLink
+              ? `💬 Чат сделки уже создан — обсуждайте условия и передавайте данные только там!\n\n`
+              : '') +
             `⏳ После того как участник присоединится и примет правила сделки, вы получите реквизиты для оплаты.`,
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                ...(chatLink ? [[{ text: '💬 Перейти в чат сделки', url: chatLink }]] : []),
+                [MENU_BUTTON],
+              ],
+            },
+          }
         );
       } catch (err) {
         await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
@@ -566,16 +720,20 @@ export function registerMessageHandler(bot: TelegramBot): void {
         await sendTrackedMessage(
           bot,
           chatId,
-          `⚠️ Спор по сделке \`#${updated.id.slice(0, 8)}\` открыт. Администратор скоро рассмотрит его.`,
+          `⚠️ Спор по сделке #${updated.code} открыт. Администратор скоро рассмотрит его.`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
 
         await bot.sendMessage(
           config.adminTelegramId.toString(),
-          `⚠️ *Новый спор!*\nСделка \`#${updated.id.slice(0, 8)}\`\nСумма: ${updated.amount} ${updated.currency}\n` +
+          `⚠️ *Новый спор!*\nСделка #${updated.code}\nСумма: ${updated.amount} ${updated.currency}\n` +
             `Причина: ${msg.text}\nИспользуйте /disputes`,
           { parse_mode: 'Markdown' }
         );
+
+        if (updated.forumTopicId) {
+          await notifyDisputeInTopic(bot, updated.forumTopicId, config.adminTelegramId, updated.code, msg.text);
+        }
       } catch (err) {
         await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
           reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
