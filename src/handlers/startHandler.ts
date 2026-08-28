@@ -16,7 +16,8 @@ import {
 } from '../services/dealService';
 import { generateUsdtTrc20Address, generateTonAddress } from '../services/paymentService';
 import { config } from '../config';
-import { sendTrackedMessage } from '../utils/messageTracker';
+import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
+import { clearWithdrawState } from './withdrawalHandler';
 
 const userState = new Map<number, { action: string; payload?: unknown }>();
 
@@ -105,7 +106,7 @@ export function registerStartHandler(bot: TelegramBot): void {
             `💰 *Сумма:* ${deal.amount} ${deal.currency}\n` +
             `📝 *Условия:* ${deal.description}\n\n` +
             `${buyer?.telegramId === user.telegramId ? '⏳ Ожидайте реквизиты для оплаты от бота.' : '⏳ Ожидайте оплаты от покупателя.'}`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
 
         if (seller) {
@@ -113,11 +114,13 @@ export function registerStartHandler(bot: TelegramBot): void {
             seller.telegramId.toString(),
             `🤝 *Участник присоединился к вашей сделке* \`#${deal.id.slice(0, 8)}\`\n\n` +
               `Если вы продавец — отправьте товар/услугу после поступления средств в эскроу.`,
-            { parse_mode: 'Markdown' }
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
           );
         }
       } catch (err) {
-        await sendTrackedMessage(bot, chatId, `❌ Ошибка присоединения: ${(err as Error).message}`);
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка присоединения: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       }
       return;
     }
@@ -133,6 +136,7 @@ export function registerStartHandler(bot: TelegramBot): void {
         inline_keyboard: [
           [{ text: '📦 Я продавец', callback_data: 'role_SELLER' }],
           [{ text: '💳 Я покупатель', callback_data: 'role_BUYER' }],
+          [MENU_BUTTON],
         ],
       },
     });
@@ -143,7 +147,9 @@ export function registerStartHandler(bot: TelegramBot): void {
     const user = await findOrCreateUser(msg.from!);
     const deals = await getUserDeals(user.id);
     if (deals.length === 0) {
-      await sendTrackedMessage(bot, chatId, '📁 У вас пока нет сделок.');
+      await sendTrackedMessage(bot, chatId, '📁 У вас пока нет сделок.', {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
 
@@ -154,7 +160,10 @@ export function registerStartHandler(bot: TelegramBot): void {
       return `\`#${d.id.slice(0, 8)}\` — ${d.amount} ${d.currency} — ${statusLabel(d.status)} (с ${partner})`;
     });
 
-    await sendTrackedMessage(bot, chatId, `📁 *Ваши сделки:*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
+    await sendTrackedMessage(bot, chatId, `📁 *Ваши сделки:*\n\n${lines.join('\n')}`, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
   });
 
   bot.onText(/\/balance/, async (msg) => {
@@ -170,7 +179,7 @@ export function registerStartHandler(bot: TelegramBot): void {
       {
         parse_mode: 'Markdown',
         reply_markup: {
-          inline_keyboard: [[{ text: '💸 Вывести', callback_data: 'withdraw' }]],
+          inline_keyboard: [[{ text: '💸 Вывести', callback_data: 'withdraw' }], [MENU_BUTTON]],
         },
       }
     );
@@ -193,6 +202,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           inline_keyboard: [
             [{ text: '📦 Я продавец', callback_data: 'role_SELLER' }],
             [{ text: '💳 Я покупатель', callback_data: 'role_BUYER' }],
+            [MENU_BUTTON],
           ],
         },
       });
@@ -281,6 +291,8 @@ export function registerCallbackHandler(bot: TelegramBot): void {
     }
 
     if (data === 'main_menu') {
+      clearUserState(userId);
+      clearWithdrawState(userId);
       await sendMainMenu(bot, chatId, user.id, query.from.first_name);
       return;
     }
@@ -293,6 +305,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           inline_keyboard: [
             [{ text: '💵 USDT TRC20', callback_data: 'currency_USDT' }],
             [{ text: '💎 TON', callback_data: 'currency_TON' }],
+            [MENU_BUTTON],
           ],
         },
       });
@@ -306,7 +319,9 @@ export function registerCallbackHandler(bot: TelegramBot): void {
         action: 'create_deal_amount',
         payload: { ...(state?.payload as object), currency },
       });
-      await sendTrackedMessage(bot, chatId, `💱 Сделка в ${currency}. Введите сумму (например, 100):`);
+      await sendTrackedMessage(bot, chatId, `💱 Сделка в ${currency}. Введите сумму (например, 100):`, {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
 
@@ -314,7 +329,9 @@ export function registerCallbackHandler(bot: TelegramBot): void {
       const [, dealId, action] = data.split(':');
       const deal = await getDeal(dealId);
       if (!deal) {
-        await sendTrackedMessage(bot, chatId, '❌ Сделка не найдена.');
+        await sendTrackedMessage(bot, chatId, '❌ Сделка не найдена.', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
         return;
       }
 
@@ -325,7 +342,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           bot,
           chatId,
           `📦 Вы отметили товар как переданный по сделке \`#${updated.id.slice(0, 8)}\`. Ожидайте подтверждения покупателя.`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
         if (buyer) {
           await bot.sendMessage(
@@ -337,6 +354,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
                 inline_keyboard: [
                   [{ text: '✅ Подтвердить получение', callback_data: `deal:${updated.id}:buyer_confirm` }],
                   [{ text: '⚠️ Открыть спор', callback_data: `deal:${updated.id}:open_dispute` }],
+                  [MENU_BUTTON],
                 ],
               },
             }
@@ -351,20 +369,22 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           bot,
           chatId,
           `✅ Сделка \`#${updated.id.slice(0, 8)}\` завершена. Спасибо!`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
         if (seller) {
           await bot.sendMessage(
             seller.telegramId.toString(),
             `✅ Сделка \`#${updated.id.slice(0, 8)}\` подтверждена покупателем. Средства зачислены на ваш баланс.`,
-            { parse_mode: 'Markdown' }
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
           );
         }
       }
 
       if (action === 'open_dispute' && getBuyerId(deal) === user.id) {
         setUserState(userId, { action: 'dispute_reason', payload: { dealId: deal.id } });
-        await sendTrackedMessage(bot, chatId, '⚠️ Опишите причину спора:');
+        await sendTrackedMessage(bot, chatId, '⚠️ Опишите причину спора:', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       }
 
       return;
@@ -386,14 +406,18 @@ export function registerMessageHandler(bot: TelegramBot): void {
     if (state.action === 'create_deal_amount') {
       const amount = parseFloat(msg.text.replace(',', '.'));
       if (Number.isNaN(amount) || amount <= 0) {
-        await sendTrackedMessage(bot, chatId, 'Введите корректную положительную сумму.');
+        await sendTrackedMessage(bot, chatId, 'Введите корректную положительную сумму.', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
         return;
       }
       setUserState(userId, {
         action: 'create_deal_description',
         payload: { ...(state.payload as Record<string, unknown>), amount },
       });
-      await sendTrackedMessage(bot, chatId, 'Введите описание товара/услуги:');
+      await sendTrackedMessage(bot, chatId, 'Введите описание товара/услуги:', {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
 
@@ -432,10 +456,12 @@ export function registerMessageHandler(bot: TelegramBot): void {
             `📝 *Описание:* ${msg.text}\n\n` +
             `🔗 Отправьте эту ссылку второму участнику:\n${link}\n\n` +
             `📥 Адрес для оплаты покупателя: \`${paymentAddress}\``,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
       } catch (err) {
-        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`);
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       }
       clearUserState(userId);
       return;
@@ -449,7 +475,7 @@ export function registerMessageHandler(bot: TelegramBot): void {
           bot,
           chatId,
           `⚠️ Спор по сделке \`#${updated.id.slice(0, 8)}\` открыт. Администратор скоро рассмотрит его.`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
 
         await bot.sendMessage(
@@ -459,7 +485,9 @@ export function registerMessageHandler(bot: TelegramBot): void {
           { parse_mode: 'Markdown' }
         );
       } catch (err) {
-        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`);
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       }
       clearUserState(userId);
       return;

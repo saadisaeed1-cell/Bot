@@ -1,5 +1,12 @@
 import TelegramBot from 'node-telegram-bot-api';
 
+// Shared "back to main menu" button used across every screen so the user
+// always has a way to return to the home screen.
+export const MENU_BUTTON: TelegramBot.InlineKeyboardButton = {
+  text: '⬅️ В меню',
+  callback_data: 'main_menu',
+};
+
 // Tracks the last bot message sent to a given chat so it can be deleted
 // before the next one is sent. This keeps the chat clean (only the current
 // menu/prompt is visible) instead of piling up old messages.

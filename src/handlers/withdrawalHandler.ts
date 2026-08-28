@@ -2,9 +2,13 @@ import TelegramBot from 'node-telegram-bot-api';
 import { findOrCreateUser } from '../services/dealService';
 import { prisma } from '../db';
 import { Prisma, TransactionType, TxStatus } from '@prisma/client';
-import { sendTrackedMessage } from '../utils/messageTracker';
+import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
 
 const withdrawState = new Map<number, { currency: 'USDT' | 'TON'; amount: number; address: string }>();
+
+export function clearWithdrawState(userId: number): void {
+  withdrawState.delete(userId);
+}
 
 export function registerWithdrawalHandler(bot: TelegramBot): void {
   bot.onText(/\/withdraw/, async (msg) => {
@@ -20,6 +24,7 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
           inline_keyboard: [
             [{ text: 'USDT TRC20', callback_data: 'withdraw_currency_USDT' }],
             [{ text: 'TON', callback_data: 'withdraw_currency_TON' }],
+            [MENU_BUTTON],
           ],
         },
       }
@@ -35,7 +40,18 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
       const currency = data.replace('withdraw_currency_', '') as 'USDT' | 'TON';
       withdrawState.set(userId, { currency, amount: 0, address: '' });
       await bot.answerCallbackQuery(query.id);
-      await sendTrackedMessage(bot, chatId, `Введите сумму для вывода ${currency}:`);
+      await sendTrackedMessage(bot, chatId, `Введите сумму для вывода ${currency}:`, {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (data === 'withdraw_cancel') {
+      await bot.answerCallbackQuery(query.id);
+      withdrawState.delete(userId);
+      await sendTrackedMessage(bot, chatId, 'Вывод отменен.', {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
 
@@ -83,10 +99,12 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
           chatId,
           `Заявка на вывод ${state.amount} ${state.currency} на адрес \`${state.address}\` создана.\n` +
             `Администратор обработает её вручную.`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
       } catch (err) {
-        await sendTrackedMessage(bot, chatId, `Ошибка: ${(err as Error).message}`);
+        await sendTrackedMessage(bot, chatId, `Ошибка: ${(err as Error).message}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       }
       return;
     }
@@ -102,12 +120,16 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
     if (state.amount === 0) {
       const amount = parseFloat(msg.text.replace(',', '.'));
       if (Number.isNaN(amount) || amount <= 0) {
-        await sendTrackedMessage(bot, chatId, 'Введите положительную сумму.');
+        await sendTrackedMessage(bot, chatId, 'Введите положительную сумму.', {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
         return;
       }
       state.amount = amount;
       withdrawState.set(userId, state);
-      await sendTrackedMessage(bot, chatId, 'Введите адрес для вывода:');
+      await sendTrackedMessage(bot, chatId, 'Введите адрес для вывода:', {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
 
@@ -123,6 +145,7 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
             inline_keyboard: [
               [{ text: 'Подтвердить', callback_data: 'withdraw_confirm' }],
               [{ text: 'Отмена', callback_data: 'withdraw_cancel' }],
+              [MENU_BUTTON],
             ],
           },
         }
