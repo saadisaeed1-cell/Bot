@@ -22,7 +22,7 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: 'USDT TRC20', callback_data: 'withdraw_currency_USDT' }],
+            [{ text: 'USDT', callback_data: 'withdraw_currency_USDT' }],
             [{ text: 'TON', callback_data: 'withdraw_currency_TON' }],
             [MENU_BUTTON],
           ],

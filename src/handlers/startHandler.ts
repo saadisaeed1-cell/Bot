@@ -276,7 +276,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
           `4️⃣ *Как вывести средства?*\n` +
           `Используйте команду /withdraw или кнопку «Кошелек / Баланс» → «Вывести».\n\n` +
           `5️⃣ *Поддерживаемые валюты*\n` +
-          `USDT (TRC20) и TON.`,
+          `USDT и TON.`,
         {
           parse_mode: 'Markdown',
           reply_markup: {
@@ -362,7 +362,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
       await sendTrackedMessage(bot, chatId, '💱 Выберите валюту сделки:', {
         reply_markup: {
           inline_keyboard: [
-            [{ text: '💵 USDT TRC20', callback_data: 'currency_USDT' }],
+            [{ text: '💵 USDT', callback_data: 'currency_USDT' }],
             [{ text: '💎 TON', callback_data: 'currency_TON' }],
             [MENU_BUTTON],
           ],
@@ -379,7 +379,7 @@ export function registerCallbackHandler(bot: TelegramBot): void {
 
         const paymentAddress =
           updated.currency === 'USDT'
-            ? (await generateUsdtTrc20Address()) ?? 'TRON_NOT_CONFIGURED'
+            ? (await generateUsdtTrc20Address()) ?? 'ADDRESS_NOT_CONFIGURED'
             : generateTonAddress() ?? 'TON_NOT_CONFIGURED';
         const withAddress = await setDealPaymentAddress(updated.id, paymentAddress);
 
