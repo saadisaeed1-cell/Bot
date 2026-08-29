@@ -29,14 +29,17 @@ async function main(): Promise<void> {
 
   const bot = new TelegramBot(config.botToken, { polling: true });
 
-  // Debug helper: log chat id/title for any non-private chat (groups/supergroups)
-  // so the group's chat_id can be found via Railway logs. Safe to keep enabled.
-  bot.on('message', (msg) => {
-    if (msg.chat.type !== 'private') {
-      console.log(
-        `[chat-id] type=${msg.chat.type} id=${msg.chat.id} title=${msg.chat.title ?? ''}`
-      );
-    }
+  // Debug helper: /chatid replies with the chat id directly in the chat,
+  // so it's visible right in Telegram without digging through Railway logs.
+  bot.onText(/^\/chatid$/, (msg) => {
+    console.log(
+      `[chat-id] type=${msg.chat.type} id=${msg.chat.id} title=${msg.chat.title ?? ''}`
+    );
+    bot
+      .sendMessage(msg.chat.id, `🆔 Chat ID этого чата: \`${msg.chat.id}\``, {
+        parse_mode: 'Markdown',
+      })
+      .catch((err) => console.error('Failed to send chat id reply:', err));
   });
 
   registerStartHandler(bot);
