@@ -1,6 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from './config';
-import { initTronWeb } from './services/paymentService';
+import { initEscrowWallet } from './services/paymentService';
 import { startPaymentWatcher } from './services/paymentWatcher';
 import {
   registerStartHandler,
@@ -22,9 +22,9 @@ async function main(): Promise<void> {
   console.log('Starting bot...');
 
   try {
-    initTronWeb();
+    await initEscrowWallet();
   } catch (err) {
-    console.error('TronWeb init failed (non-critical):', err);
+    console.error('TON escrow wallet init failed (non-critical):', err);
   }
 
   const bot = new TelegramBot(config.botToken, {

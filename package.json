@@ -19,7 +19,6 @@
     "escrow",
     "guarantor",
     "usdt",
-    "tron",
     "ton",
     "postgresql"
   ],
@@ -27,12 +26,12 @@
   "license": "MIT",
   "dependencies": {
     "@prisma/client": "^5.18.0",
-    "@ton/ton": "^14.0.0",
+    "@ton/core": "^0.59.0",
     "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^14.0.0",
     "dotenv": "^16.4.5",
     "node-cron": "^3.0.3",
-    "node-telegram-bot-api": "^0.66.0",
-    "tronweb": "^6.0.0"
+    "node-telegram-bot-api": "^0.66.0"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",

@@ -19,7 +19,7 @@ import {
   cancelDeal,
   DealWithUsers,
 } from '../services/dealService';
-import { generateUsdtTrc20Address, generateTonAddress } from '../services/paymentService';
+import { getEscrowAddress, getDepositMemo } from '../services/paymentService';
 import { DEAL_CATEGORIES, getCategoryLabel, buildTermsMessage } from '../services/termsService';
 import {
   createDealTopic,
@@ -494,20 +494,25 @@ export function registerCallbackHandler(bot: TelegramBot): void {
       try {
         const updated = await acceptParticipantTerms(dealId, user.id);
         const seller = getSellerId(updated) === updated.creatorId ? updated.creator : updated.participant;
+        const buyer = getBuyerId(updated) === updated.creatorId ? updated.creator : updated.participant;
 
-        const paymentAddress =
-          updated.currency === 'USDT'
-            ? (await generateUsdtTrc20Address()) ?? 'ADDRESS_NOT_CONFIGURED'
-            : generateTonAddress() ?? 'TON_NOT_CONFIGURED';
-        const withAddress = await setDealPaymentAddress(updated.id, paymentAddress);
+        const escrowAddress = await getEscrowAddress();
+        const memo = getDepositMemo(updated.code);
+        const withAddress = await setDealPaymentAddress(updated.id, escrowAddress ?? 'NOT_CONFIGURED');
+
+        const paymentInstruction =
+          escrowAddress
+            ? `💳 Переведите *точную* сумму *${withAddress.amount} ${withAddress.currency}* на адрес бота:\n` +
+              `\`${escrowAddress}\`\n\n` +
+              `⚠️ *Обязательно укажите в комментарии/сообщении к переводу код:* \`${memo}\`\n\n` +
+              `Без правильного кода платёж не будет засчитан автоматически.`
+            : `⚠️ Платёжный адрес не настроен. Обратитесь в поддержку.`;
 
         await sendTrackedMessage(
           bot,
           chatId,
-          `✅ Условия приняты!\n\n` +
-            `💳 Переведите точную сумму *${withAddress.amount} ${withAddress.currency}* на адрес:\n` +
-            `\`${paymentAddress}\`\n\n` +
-            `После поступления средств сделка перейдет в статус «Средства заморожены».`,
+          `✅ Условия приняты!\n\n${paymentInstruction}\n\n` +
+            `После поступления средств сделка перейдёт в статус «Средства заморожены».`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
 

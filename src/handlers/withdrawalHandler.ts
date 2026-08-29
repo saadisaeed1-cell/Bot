@@ -2,7 +2,8 @@ import TelegramBot from 'node-telegram-bot-api';
 import { findOrCreateUser } from '../services/dealService';
 import { prisma } from '../db';
 import { Prisma, TransactionType, TxStatus } from '@prisma/client';
-import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
+import { sendTrackedMessage, MENU_BUTTON, trackUserMessage } from '../utils/messageTracker';
+import { sendTon, sendUsdtJetton, isTonConfigured } from '../services/paymentService';
 
 const withdrawState = new Map<number, { currency: 'USDT' | 'TON'; amount: number; address: string }>();
 
@@ -65,6 +66,11 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
       const requested = new Prisma.Decimal(state.amount);
 
       try {
+        if (!isTonConfigured()) {
+          throw new Error('Выплаты не настроены: отсутствует кошелёк бота (TON_ESCROW_MNEMONIC).');
+        }
+
+        // 1. Atomically deduct the balance first (prevents double-withdrawal).
         await prisma.$transaction(
           async (tx) => {
             const freshUser = await tx.user.findUnique({ where: { id: user.id } });
@@ -72,7 +78,7 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
 
             const balance = state.currency === 'TON' ? freshUser.balanceTon : freshUser.balanceUsdt;
             if (balance.lessThan(requested)) {
-              throw new Error('Insufficient balance');
+              throw new Error('Недостаточно средств на балансе');
             }
 
             await tx.$queryRawUnsafe(
@@ -86,23 +92,67 @@ export function registerWithdrawalHandler(bot: TelegramBot): void {
                 amount: requested,
                 currency: state.currency,
                 status: TxStatus.PENDING,
-                description: `Withdrawal to ${state.address}`,
+                description: `Instant withdrawal to ${state.address}`,
               },
             });
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
         );
 
+        // 2. Send the on-chain payout instantly from the escrow wallet.
+        let txHash: string;
+        if (state.currency === 'TON') {
+          txHash = await sendTon(state.address, state.amount);
+        } else {
+          txHash = await sendUsdtJetton(state.address, state.amount);
+        }
+
+        // 3. Mark the transaction as completed.
+        const txRecord = await prisma.transaction.findFirst({
+          where: { userId: user.id, type: TransactionType.WITHDRAWAL, status: TxStatus.PENDING },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (txRecord) {
+          await prisma.transaction.update({
+            where: { id: txRecord.id },
+            data: { status: TxStatus.COMPLETED, txHash },
+          });
+        }
+
         withdrawState.delete(userId);
         await sendTrackedMessage(
           bot,
           chatId,
-          `Заявка на вывод ${state.amount} ${state.currency} на адрес \`${state.address}\` создана.\n` +
-            `Администратор обработает её вручную.`,
+          `✅ Вывод *${state.amount} ${state.currency}* на адрес \`${state.address}\` выполнен мгновенно!`,
           { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
         );
       } catch (err) {
-        await sendTrackedMessage(bot, chatId, `Ошибка: ${(err as Error).message}`, {
+        // Refund the balance if the on-chain transfer failed after deduction.
+        try {
+          await prisma.$transaction(
+            async (tx) => {
+              await tx.$queryRawUnsafe(
+                `UPDATE users SET ${balanceField} = ${balanceField} + ${requested.toFixed(8)} WHERE id = ${user.id}`
+              );
+              const pending = await tx.transaction.findFirst({
+                where: { userId: user.id, type: TransactionType.WITHDRAWAL, status: TxStatus.PENDING },
+                orderBy: { createdAt: 'desc' },
+              });
+              if (pending) {
+                await tx.transaction.update({
+                  where: { id: pending.id },
+                  data: { status: TxStatus.FAILED },
+                });
+              }
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+          );
+        } catch (refundErr) {
+          console.error('Failed to refund balance after failed withdrawal:', refundErr);
+        }
+
+        withdrawState.delete(userId);
+        await sendTrackedMessage(bot, chatId, `❌ Ошибка вывода: ${(err as Error).message}`, {
           reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
       }

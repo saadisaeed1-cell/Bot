@@ -1,111 +1,337 @@
-import { TronWeb } from 'tronweb';
+import { Address, beginCell, internal, SendMode, toNano, Cell } from '@ton/core';
+import { TonClient, WalletContractV4, JettonMaster } from '@ton/ton';
+import { mnemonicToPrivateKey } from '@ton/crypto';
 import { config } from '../config';
 import { Prisma } from '@prisma/client';
 
-let tronWeb: TronWeb | null = null;
+let client: TonClient | null = null;
+let escrowWallet: WalletContractV4 | null = null;
+let escrowKeyPair: { publicKey: Buffer; secretKey: Buffer } | null = null;
+let escrowAddress: Address | null = null;
+let usdtMasterAddress: Address | null = null;
 
-export function initTronWeb(): TronWeb | null {
-  if (!config.tron.escrowPrivateKey) return null;
-  tronWeb = new TronWeb({
-    fullHost: config.tron.fullNode,
-    headers: config.tron.apiKey ? { 'TRON-PRO-API-KEY': config.tron.apiKey } : undefined,
-    privateKey: config.tron.escrowPrivateKey,
+export function isTonConfigured(): boolean {
+  return Boolean(config.ton.escrowMnemonic);
+}
+
+export function initTonClient(): TonClient | null {
+  if (client) return client;
+  if (!isTonConfigured()) return null;
+  client = new TonClient({
+    endpoint: config.ton.endpoint,
+    apiKey: config.ton.apiKey,
   });
-  return tronWeb;
+  return client;
 }
 
-export async function generateUsdtTrc20Address(): Promise<string | null> {
-  if (!tronWeb) initTronWeb();
-  if (!tronWeb) return null;
+export async function initEscrowWallet(): Promise<{
+  wallet: WalletContractV4;
+  address: Address;
+  keyPair: { publicKey: Buffer; secretKey: Buffer };
+} | null> {
+  if (escrowWallet && escrowAddress && escrowKeyPair) {
+    return { wallet: escrowWallet, address: escrowAddress, keyPair: escrowKeyPair };
+  }
+  if (!isTonConfigured()) return null;
 
-  // Create a new random address per deal for better traceability.
-  const account = await tronWeb.createAccount();
-  return account.address.base58;
+  const keyPair = await mnemonicToPrivateKey(config.ton.escrowMnemonic!.split(' '));
+  const wallet = WalletContractV4.create({
+    workchain: 0,
+    publicKey: keyPair.publicKey,
+  });
+  escrowWallet = wallet;
+  escrowKeyPair = keyPair;
+  escrowAddress = wallet.address;
+  usdtMasterAddress = Address.parse(config.ton.usdtMaster);
+
+  return { wallet, address: wallet.address, keyPair };
 }
 
-export async function verifyUsdtTrc20Payment(
-  address: string,
-  expectedAmount: number,
-  txHash?: string
-): Promise<{ verified: boolean; amount: number; txHash?: string }> {
-  if (!tronWeb) initTronWeb();
-  if (!tronWeb) throw new Error('TRON not configured');
+export async function getEscrowAddress(): Promise<string | null> {
+  const escrow = await initEscrowWallet();
+  return escrow?.address.toString({ bounceable: true, urlSafe: true }) ?? null;
+}
 
+/**
+ * Generates the memo comment a buyer must attach to their deposit.
+ * For TON native deposits the comment is the deal code itself.
+ * For USDT-jetton deposits the forward_payload must carry the same code.
+ */
+export function getDepositMemo(dealCode: string): string {
+  return dealCode;
+}
+
+function toncenterHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.ton.apiKey) headers['X-API-Key'] = config.ton.apiKey;
+  return headers;
+}
+
+async function toncenterGet<T>(path: string): Promise<T | null> {
+  const url = `${config.ton.endpoint.replace(/\/jsonRPC$/, '')}${path}`;
   try {
-    const contract = await tronWeb.contract().at(config.tron.usdtContract);
-
-    if (txHash) {
-      const tx = await tronWeb.trx.getTransaction(txHash);
-      const ret = (tx.ret as Array<{ contractRet?: string }>)?.[0];
-      if (ret?.contractRet !== 'SUCCESS') return { verified: false, amount: 0 };
-
-      const info = await tronWeb.trx.getTransactionInfo(txHash);
-      if (!info || info.receipt?.result !== 'SUCCESS') return { verified: false, amount: 0 };
-
-      // Decode transfer to escrow address
-      const logs = info.log ?? [];
-      for (const log of logs) {
-        if (log.topics && log.topics[0] === 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef') {
-          const to = '41' + log.topics[2].slice(-40);
-          if (tronWeb.address.fromHex(to) === address) {
-            const amount = Number(log.data) / 1e6;
-            return {
-              verified: amount >= expectedAmount,
-              amount,
-              txHash,
-            };
-          }
-        }
-      }
-      return { verified: false, amount: 0 };
+    const res = await fetch(url, { headers: toncenterHeaders() });
+    if (!res.ok) {
+      console.error(`TonCenter API error ${res.status}: ${await res.text()}`);
+      return null;
     }
-
-    // Fallback: check current balance of the address
-    const balance = await contract.balanceOf(address).call();
-    const amount = Number(balance.toString()) / 1e6;
-    return {
-      verified: amount >= expectedAmount,
-      amount,
-    };
+    return (await res.json()) as T;
   } catch (err) {
-    console.error('verifyUsdtTrc20Payment error:', err);
-    return { verified: false, amount: 0 };
+    console.error('TonCenter fetch error:', err);
+    return null;
   }
 }
 
-export async function sweepUsdtTrc20(fromPrivateKey: string, toAddress: string): Promise<string> {
-  if (!tronWeb) initTronWeb();
-  if (!tronWeb) throw new Error('TRON not configured');
+interface TonCenterJettonTransfer {
+  query_id: string;
+  source: string;
+  destination: string;
+  amount: string;
+  source_wallet: string;
+  jetton_master: string;
+  transaction_hash: string;
+  transaction_lt: string;
+  transaction_now: number;
+  transaction_aborted: boolean;
+  response_destination: string;
+  custom_payload: string | null;
+  forward_ton_amount: string;
+  forward_payload: string | null;
+  decoded_forward_payload?: {
+    type: string;
+    comment?: string;
+  } | null;
+}
 
-  const localTron = new TronWeb({
-    fullHost: config.tron.fullNode,
-    headers: config.tron.apiKey ? { 'TRON-PRO-API-KEY': config.tron.apiKey } : undefined,
-    privateKey: fromPrivateKey,
+interface TonCenterJettonTransfersResponse {
+  jetton_transfers: TonCenterJettonTransfer[];
+}
+
+interface TonCenterTransaction {
+  hash: string;
+  lt: string;
+  now: number;
+  in_msg?: {
+    source?: string;
+    destination?: string;
+    value?: string;
+    message_content?: {
+      body?: string;
+      decoded?: {
+        comment?: string;
+      } | null;
+    } | null;
+  } | null;
+}
+
+interface TonCenterTransactionsResponse {
+  transactions: TonCenterTransaction[];
+}
+
+/**
+ * TonCenter v3 returns payloads as base64-encoded single-cell BOCs.
+ * Decodes the BOC and extracts a text comment: first 32 bits must be opcode 0,
+ * the rest is the comment text. Returns null if not a text comment.
+ */
+function parseCommentFromBocBase64(bocBase64: string): string | null {
+  try {
+    const cell = Cell.fromBoc(Buffer.from(bocBase64, 'base64'))[0];
+    if (!cell) return null;
+    const slice = cell.beginParse();
+    if (slice.remainingBits < 32) return null;
+    const opcode = slice.loadUint(32);
+    if (opcode !== 0) return null; // 0 = text comment opcode
+    const bytes = [];
+    while (slice.remainingBits >= 8) {
+      bytes.push(slice.loadUint(8));
+    }
+    return Buffer.from(bytes).toString('utf-8').replace(/\0/g, '').trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseMemoFromTransfer(transfer: TonCenterJettonTransfer): string | null {
+  const decoded = transfer.decoded_forward_payload;
+  if (decoded?.type === 'text_comment' && decoded.comment) {
+    return decoded.comment.trim();
+  }
+  if (transfer.forward_payload) {
+    return parseCommentFromBocBase64(transfer.forward_payload);
+  }
+  return null;
+}
+
+function parseMemoFromTonTx(tx: TonCenterTransaction): string | null {
+  const decoded = tx.in_msg?.message_content?.decoded?.comment;
+  if (decoded) return decoded.trim();
+  const body = tx.in_msg?.message_content?.body;
+  if (body) return parseCommentFromBocBase64(body);
+  return null;
+}
+
+/**
+ * Scans the escrow wallet for recent deposits matching any of the provided memos.
+ * Returns a map memo -> { currency, amount, txHash } for verified deposits.
+ */
+export async function scanEscrowDeposits(
+  memos: string[]
+): Promise<Record<string, { currency: 'USDT' | 'TON'; amount: number; txHash: string }>> {
+  const result: Record<string, { currency: 'USDT' | 'TON'; amount: number; txHash: string }> = {};
+  if (!isTonConfigured()) return result;
+
+  const escrow = await initEscrowWallet();
+  if (!escrow) return result;
+  const escrowRaw = escrow.address.toRawString();
+
+  // 1. Check native TON transfers.
+  const tonTxs = await toncenterGet<TonCenterTransactionsResponse>(
+    `/api/v3/transactions?account=${escrowRaw}&limit=20`
+  );
+  if (tonTxs?.transactions) {
+    for (const tx of tonTxs.transactions) {
+      if (!tx.in_msg?.value) continue;
+      const memo = parseMemoFromTonTx(tx);
+      if (!memo || !memos.includes(memo)) continue;
+      const amount = Number(tx.in_msg.value) / 1e9;
+      result[memo] = { currency: 'TON', amount, txHash: tx.hash };
+    }
+  }
+
+  // 2. Check USDT jetton transfers directed to the escrow wallet.
+  const usdtRaw = Address.parse(config.ton.usdtMaster).toRawString();
+  const escrowRawFriendly = escrow.address.toString({ bounceable: true, urlSafe: true });
+  const jettonTxs = await toncenterGet<TonCenterJettonTransfersResponse>(
+    `/api/v3/jetton/transfers?jetton_master=${usdtRaw}&limit=50`
+  );
+  if (jettonTxs?.jetton_transfers) {
+    for (const transfer of jettonTxs.jetton_transfers) {
+      if (transfer.transaction_aborted) continue;
+      // Match destination by both raw and user-friendly forms (API may return either).
+      if (
+        transfer.destination !== escrowRaw &&
+        transfer.destination !== escrowRawFriendly
+      ) {
+        continue;
+      }
+      const memo = parseMemoFromTransfer(transfer);
+      if (!memo || !memos.includes(memo)) continue;
+      const amount = Number(transfer.amount) / 1e6;
+      result[memo] = { currency: 'USDT', amount, txHash: transfer.transaction_hash };
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Verifies a single deposit by memo. Convenience wrapper around scanEscrowDeposits.
+ */
+export async function verifyTonOrUsdtDeposit(
+  memo: string,
+  expectedAmount: number,
+  currency: 'USDT' | 'TON'
+): Promise<{ verified: boolean; amount: number; txHash?: string }> {
+  const found = await scanEscrowDeposits([memo]);
+  const deposit = found[memo];
+  if (!deposit || deposit.currency !== currency) {
+    return { verified: false, amount: 0 };
+  }
+  return {
+    verified: deposit.amount >= expectedAmount * 0.9999, // small float tolerance
+    amount: deposit.amount,
+    txHash: deposit.txHash,
+  };
+}
+
+/**
+ * Sends TON from the escrow wallet to a destination address.
+ * Returns the txHash of the external message.
+ */
+export async function sendTon(
+  toAddress: string,
+  amountTon: number
+): Promise<string> {
+  const escrow = await initEscrowWallet();
+  if (!escrow) throw new Error('TON escrow wallet not configured');
+  const tonClient = initTonClient();
+  if (!tonClient) throw new Error('TON client not initialized');
+
+  const provider = tonClient.provider(escrow.address, escrow.wallet.init);
+  const seqno = await escrow.wallet.getSeqno(provider);
+
+  const transfer = internal({
+    to: Address.parse(toAddress),
+    value: toNano(amountTon.toFixed(9)),
+    bounce: false,
   });
 
-  const contract = await localTron.contract().at(config.tron.usdtContract);
-  const balance = await contract.balanceOf(localTron.defaultAddress.base58).call();
-  const amount = balance.toString();
+  await escrow.wallet.sendTransfer(provider, {
+    seqno,
+    secretKey: escrow.keyPair.secretKey,
+    messages: [transfer],
+    sendMode: SendMode.PAY_GAS_SEPARATELY,
+  });
 
-  const tx = await contract.transfer(toAddress, amount).send();
-  return tx as string;
+  // Return a synthetic hash; the real txHash requires polling for the outgoing transaction.
+  return `pending-${Date.now()}`;
 }
 
-// --- TON placeholder helpers ---
-// For production use @ton/ton Wallet + TonClient to generate addresses and verify payments.
-export function generateTonAddress(): string | null {
-  if (!config.ton.escrowMnemonic) return null;
-  // Simplified: in real implementation derive a sub-address from mnemonic + deal index.
-  return 'EQ' + Buffer.from(Math.random().toString()).toString('base64').slice(0, 40).replace(/[^a-zA-Z0-9]/g, '');
-}
+/**
+ * Sends USDT-jetton from the escrow wallet to a destination address.
+ */
+export async function sendUsdtJetton(
+  toAddress: string,
+  amountUsdt: number
+): Promise<string> {
+  const escrow = await initEscrowWallet();
+  if (!escrow) throw new Error('TON escrow wallet not configured');
+  const tonClient = initTonClient();
+  if (!tonClient) throw new Error('TON client not initialized');
+  if (!usdtMasterAddress) throw new Error('USDT master address not initialized');
 
-export async function verifyTonPayment(
-  _address: string,
-  _expectedAmount: number,
-  _txHash?: string
-): Promise<{ verified: boolean; amount: number }> {
-  // TODO: integrate TonCenter API or @ton/ton client
-  return { verified: false, amount: 0 };
+  const provider = tonClient.provider(escrow.address, escrow.wallet.init);
+  const seqno = await escrow.wallet.getSeqno(provider);
+
+  // Determine the escrow's USDT jetton wallet address.
+  const master = JettonMaster.create(usdtMasterAddress);
+  const jettonWalletAddress = await master.getWalletAddress(provider, escrow.address);
+
+  const amount = BigInt(Math.round(amountUsdt * 1e6));
+  const destination = Address.parse(toAddress);
+
+  const forwardPayload = beginCell()
+    .storeUint(0, 32) // 0 opcode = text comment
+    .storeStringTail('Escrow payout')
+    .endCell();
+
+  const messageBody = beginCell()
+    .storeUint(0x0f8a7ea5, 32) // jetton transfer opcode
+    .storeUint(0, 64) // query id
+    .storeCoins(amount)
+    .storeAddress(destination)
+    .storeAddress(escrow.address) // response destination
+    .storeBit(0) // no custom payload
+    .storeCoins(toNano('0.02')) // forward ton amount
+    .storeBit(1) // forward payload as ref
+    .storeRef(forwardPayload)
+    .endCell();
+
+  const transfer = internal({
+    to: jettonWalletAddress,
+    value: toNano('0.1'),
+    bounce: true,
+    body: messageBody,
+  });
+
+  await escrow.wallet.sendTransfer(provider, {
+    seqno,
+    secretKey: escrow.keyPair.secretKey,
+    messages: [transfer],
+    sendMode: SendMode.PAY_GAS_SEPARATELY,
+  });
+
+  return `pending-${Date.now()}`;
 }
 
 export function formatAmount(amount: Prisma.Decimal | number | string): string {

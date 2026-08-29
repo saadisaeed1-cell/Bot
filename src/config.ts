@@ -17,18 +17,16 @@ export const config = {
   serviceFeePercent: Number(process.env.SERVICE_FEE_PERCENT ?? '3'),
   port: Number(process.env.PORT ?? '3000'),
   webhookUrl: process.env.WEBHOOK_URL,
-  tron: {
-    fullNode: process.env.TRON_FULL_NODE ?? 'https://api.trongrid.io',
-    solidityNode: process.env.TRON_SOLIDITY_NODE ?? 'https://api.trongrid.io',
-    eventServer: process.env.TRON_EVENT_SERVER ?? 'https://api.trongrid.io',
-    apiKey: process.env.TRON_API_KEY,
-    escrowPrivateKey: process.env.TRON_ESCROW_PRIVATE_KEY,
-    usdtContract: process.env.USDT_TRC20_CONTRACT ?? 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
-  },
   ton: {
     endpoint: process.env.TON_ENDPOINT ?? 'https://toncenter.com/api/v2/jsonRPC',
     apiKey: process.env.TON_API_KEY,
+    // 24-word mnemonic for the bot's single TON escrow wallet.
+    // All deposits and instant payouts are signed with this wallet.
     escrowMnemonic: process.env.TON_ESCROW_MNEMONIC,
+    // Official Tether USD₮ jetton master on TON mainnet.
+    usdtMaster:
+      process.env.TON_USDT_MASTER ??
+      'EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs',
   },
   // Private supergroup with Topics enabled, used as an isolated chat room per deal.
   forumGroupChatId: process.env.FORUM_GROUP_CHAT_ID,
