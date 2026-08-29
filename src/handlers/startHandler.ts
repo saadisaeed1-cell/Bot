@@ -29,7 +29,7 @@ import {
   sendPendingTopicLink,
 } from '../services/forumService';
 import { config } from '../config';
-import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
+import { sendTrackedMessage, MENU_BUTTON, trackUserMessage } from '../utils/messageTracker';
 import { clearWithdrawState } from './withdrawalHandler';
 
 const userState = new Map<number, { action: string; payload?: unknown }>();
@@ -615,6 +615,10 @@ export function registerMessageHandler(bot: TelegramBot): void {
 
     const userId = msg.from!.id;
     const chatId = msg.chat.id;
+
+    // Track the user's message so it can be cleaned up once we reply.
+    trackUserMessage(chatId, msg.message_id);
+
     const state = getUserState(userId);
     if (!state) return;
 
