@@ -9,18 +9,17 @@ const DISCLAIMER_TEXT =
   'Если обсуждение или передача данных будет происходить в личных сообщениях (ЛС), ' +
   'страховка гаранта сгорает, и в случае скама бот не несет ответственности.';
 
+// Pending invitations: telegramUserId -> { dealId, topicId }
+// Used to send the direct topic link in PM once the user actually joins the group.
+const pendingTopicLinks = new Map<
+  number,
+  { dealId: string; code: string; topicId: number }
+>();
+
 export function isForumConfigured(): boolean {
-  const configured = Boolean(config.forumGroupChatId);
-  console.log(`[forum] configured=${configured} chatId=${config.forumGroupChatId ?? 'not set'}`);
-  return configured;
+  return Boolean(config.forumGroupChatId);
 }
 
-/**
- * Creates an isolated Forum Topic for a deal, posts and pins the mandatory
- * disclaimer inside it, and stores the resulting topic id on the deal row.
- * Returns null (and logs) if the forum group is not configured or the call fails,
- * so deal creation never gets blocked by a Telegram/API issue.
- */
 export async function createDealTopic(
   bot: TelegramBot,
   dealId: string,
@@ -30,8 +29,6 @@ export async function createDealTopic(
   const chatId = config.forumGroupChatId as string;
 
   try {
-    // The @types package incorrectly declares this as Promise<boolean>; the actual
-    // Telegram API (and the underlying implementation) resolves with a ForumTopic object.
     const topic = (await bot.createForumTopic(chatId, `Сделка #${code}`)) as unknown as {
       message_thread_id: number;
     };
@@ -59,10 +56,6 @@ export async function createDealTopic(
   }
 }
 
-/**
- * Direct t.me link straight into a topic. Only reliably opens for users who
- * are already members of the group (or when the group is public).
- */
 export function getTopicDirectLink(topicId: number): string | null {
   if (!config.forumGroupChatId) return null;
   if (config.forumGroupUsername) {
@@ -91,15 +84,60 @@ export async function createOneTimeGroupInvite(
 }
 
 /**
- * Resolves the best possible link to send a user into the deal's topic:
- * a direct topic link if they're already a group member, otherwise a fresh
- * one-time invite link to the group.
+ * Registers a pending topic link for a user. When the user joins the forum group,
+ * sendPendingTopicLink() should be called to deliver the direct topic URL via PM.
+ */
+export function registerPendingTopicLink(
+  telegramUserId: number,
+  dealId: string,
+  code: string,
+  topicId: number
+): void {
+  pendingTopicLinks.set(telegramUserId, { dealId, code, topicId });
+}
+
+export function hasPendingTopicLink(telegramUserId: number): boolean {
+  return pendingTopicLinks.has(telegramUserId);
+}
+
+/**
+ * If the user has a pending topic link, send them the direct topic URL in PM.
+ * Should be called on chat_member update when status becomes member/administrator/creator.
+ */
+export async function sendPendingTopicLink(
+  bot: TelegramBot,
+  telegramUserId: number
+): Promise<void> {
+  const pending = pendingTopicLinks.get(telegramUserId);
+  if (!pending) return;
+
+  const link = getTopicDirectLink(pending.topicId);
+  pendingTopicLinks.delete(telegramUserId);
+  if (!link) return;
+
+  try {
+    await bot.sendMessage(
+      telegramUserId,
+      `✅ Вы вступили в группу сделки #${pending.code}.\n\n` +
+        `💬 Вот ссылка прямо в ваш изолированный чат сделки:\n${link}\n\n` +
+        `Все обсуждения и передача данных — только там!`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    console.error('Failed to send pending topic link:', err);
+  }
+}
+
+/**
+ * Returns a one-time invite link for the forum group and registers the user so
+ * the direct topic link is sent via PM once they join.
  */
 export async function getDealChatLink(
   bot: TelegramBot,
   telegramUserId: number,
   topicId: number,
-  code: string
+  code: string,
+  dealId: string
 ): Promise<string | null> {
   if (!isForumConfigured()) return null;
 
@@ -109,10 +147,14 @@ export async function getDealChatLink(
       return getTopicDirectLink(topicId);
     }
   } catch {
-    // Not a member yet or lookup failed — fall back to a one-time invite below.
+    // Not a member yet — fall back to a one-time invite below.
   }
 
-  return (await createOneTimeGroupInvite(bot, code)) ?? getTopicDirectLink(topicId);
+  const invite = await createOneTimeGroupInvite(bot, code);
+  if (invite) {
+    registerPendingTopicLink(telegramUserId, dealId, code, topicId);
+  }
+  return invite ?? getTopicDirectLink(topicId);
 }
 
 export async function notifyDisputeInTopic(

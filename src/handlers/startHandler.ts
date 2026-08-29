@@ -22,11 +22,11 @@ import {
 import { generateUsdtTrc20Address, generateTonAddress } from '../services/paymentService';
 import { DEAL_CATEGORIES, getCategoryLabel, buildTermsMessage } from '../services/termsService';
 import {
-  isForumConfigured,
   createDealTopic,
   getDealChatLink,
   notifyDisputeInTopic,
   notifyTopicOnCancel,
+  sendPendingTopicLink,
 } from '../services/forumService';
 import { config } from '../config';
 import { sendTrackedMessage, MENU_BUTTON } from '../utils/messageTracker';
@@ -113,7 +113,7 @@ async function joinDealFlow(
     const participantRole = deal.creatorRole === 'SELLER' ? 'BUYER' : 'SELLER';
 
     const chatLink = deal.forumTopicId
-      ? await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code)
+      ? await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code, deal.id)
       : null;
 
     await sendTrackedMessage(
@@ -124,13 +124,15 @@ async function joinDealFlow(
         `📦 *Категория:* ${getCategoryLabel(deal.category)}\n` +
         `💰 *Сумма:* ${deal.amount} ${deal.currency}\n` +
         `📝 *Условия:* ${deal.description}\n\n` +
+        (chatLink
+          ? `💬 *Ваша одноразовая ссылка для входа в группу сделки:*\n${chatLink}\n\nПосле входа бот пришлёт вам прямую ссылку на изолированный топик.\n\n`
+          : '') +
         `Прежде чем продолжить, ознакомьтесь с правилами ниже и примите их:\n\n` +
         buildTermsMessage(deal.category, participantRole),
       {
         parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
-            ...(chatLink ? [[{ text: '💬 Перейти в чат сделки', url: chatLink }]] : []),
             [{ text: '✅ Принимаю условия', callback_data: `terms_accept_participant:${deal.id}` }],
             [MENU_BUTTON],
           ],
@@ -198,8 +200,8 @@ async function sendDealCard(
 
   const rows: { text: string; url?: string; callback_data?: string }[][] = [];
 
-  if (deal.forumTopicId && isForumConfigured()) {
-    const link = await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code);
+  if (deal.forumTopicId && config.forumGroupChatId) {
+    const link = await getDealChatLink(bot, Number(user.telegramId), deal.forumTopicId, deal.code, deal.id);
     if (link) rows.push([{ text: '💬 Перейти в чат сделки', url: link }]);
   }
 
@@ -674,7 +676,7 @@ export function registerMessageHandler(bot: TelegramBot): void {
         });
 
         const topicId = await createDealTopic(bot, deal.id, deal.code);
-        const chatLink = topicId ? await getDealChatLink(bot, msg.from!.id, topicId, deal.code) : null;
+        const chatLink = topicId ? await getDealChatLink(bot, msg.from!.id, topicId, deal.code, deal.id) : null;
 
         const link = getDealInviteLink(deal.id);
         const roleText = role === 'SELLER' ? 'продавец' : 'покупатель';
@@ -691,7 +693,7 @@ export function registerMessageHandler(bot: TelegramBot): void {
             `🔑 *Код сделки для второго участника:* \`${deal.code}\`\n` +
             `Он может ввести его через «🔍 Найти сделку» или перейти по ссылке:\n${link}\n\n` +
             (chatLink
-              ? `💬 Чат сделки уже создан — обсуждайте условия и передавайте данные только там!\n\n`
+              ? `💬 *Чат сделки создан.*\nВаша одноразовая ссылка для входа в группу:\n${chatLink}\n\nПосле входа бот пришлёт вам прямую ссылку на изолированный топик.\n\n`
               : '') +
             `⏳ После того как участник присоединится и примет правила сделки, вы получите реквизиты для оплаты.`,
           {
@@ -741,6 +743,22 @@ export function registerMessageHandler(bot: TelegramBot): void {
       }
       clearUserState(userId);
       return;
+    }
+  });
+
+  // Listen for users joining the private forum group, then send them the direct
+  // link to their isolated deal topic in PM.
+  bot.on('chat_member', async (update) => {
+    try {
+      const newStatus = update.new_chat_member?.status;
+      if (newStatus !== 'member' && newStatus !== 'administrator' && newStatus !== 'creator') {
+        return;
+      }
+      const userId = update.new_chat_member?.user?.id;
+      if (!userId) return;
+      await sendPendingTopicLink(bot, userId);
+    } catch (err) {
+      console.error('chat_member handler error:', err);
     }
   });
 }

@@ -27,7 +27,21 @@ async function main(): Promise<void> {
     console.error('TronWeb init failed (non-critical):', err);
   }
 
-  const bot = new TelegramBot(config.botToken, { polling: true });
+  const bot = new TelegramBot(config.botToken, {
+    polling: {
+      params: {
+        // Required to receive chat_member updates so we can detect when a deal
+        // participant joins the private forum group and then send them the
+        // direct link to their isolated topic.
+        allowed_updates: [
+          'message',
+          'callback_query',
+          'chat_member',
+          'my_chat_member',
+        ],
+      },
+    },
+  });
 
   // Debug helper: /chatid replies with the chat id directly in the chat,
   // so it's visible right in Telegram without digging through Railway logs.
