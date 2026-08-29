@@ -10,7 +10,9 @@ const DISCLAIMER_TEXT =
   'страховка гаранта сгорает, и в случае скама бот не несет ответственности.';
 
 export function isForumConfigured(): boolean {
-  return Boolean(config.forumGroupChatId);
+  const configured = Boolean(config.forumGroupChatId);
+  console.log(`[forum] configured=${configured} chatId=${config.forumGroupChatId ?? 'not set'}`);
+  return configured;
 }
 
 /**
